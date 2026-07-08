@@ -1,0 +1,52 @@
+services:
+  dev:
+    build:
+      context: .
+      target: dev
+    image: ghcr.io/thate10/dev-container:latest
+    container_name: dev-container
+    restart: unless-stopped
+
+    # ── GPU ──────────────────────────────────────────────────────────────────
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    # ── Ports ────────────────────────────────────────────────────────────────
+    ports:
+      - "2222:22"     # SSH  →  ssh root@localhost -p 2222
+      - "8888:8888"   # JupyterLab
+      - "2719:2719"   # Marimo
+      - "8080:8080"   # vLLM / general
+
+    # ── Volumes ──────────────────────────────────────────────────────────────
+    volumes:
+      - ./workspace:/root/workspace          # your project code
+      - hf-cache:/root/.cache/huggingface    # model weights (persisted across runs)
+
+    # ── Secrets (populate from .env — see .env.example) ──────────────────────
+    environment:
+      SSH_PUBLIC_KEY:    ${SSH_PUBLIC_KEY:-}
+      SSH_PASSWORD:      ${SSH_PASSWORD:-}
+      HF_TOKEN:          ${HF_TOKEN:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      MODAL_TOKEN_ID:    ${MODAL_TOKEN_ID:-}
+      MODAL_TOKEN_SECRET: ${MODAL_TOKEN_SECRET:-}
+      WANDB_API_KEY:     ${WANDB_API_KEY:-}
+      GITHUB_TOKEN:      ${GITHUB_TOKEN:-}
+      SECRETS_REPO:      ${SECRETS_REPO:-}
+      CLAUDE_CREDENTIALS: ${CLAUDE_CREDENTIALS:-}
+
+    # ── Shared memory — required for PyTorch DataLoader workers ──────────────
+    shm_size: '16gb'
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+
+volumes:
+  hf-cache:

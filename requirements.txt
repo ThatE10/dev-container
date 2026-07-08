@@ -1,0 +1,31 @@
+# ── Visualization ─────────────────────────────────────────────────────────────
+plotly
+seaborn
+
+# ── Notebooks & interactive ───────────────────────────────────────────────────
+jupyterlab
+ipykernel
+ipywidgets
+nbformat
+marimo
+
+# ── SAE research ──────────────────────────────────────────────────────────────
+sae-lens
+
+# ── Fine-tuning / training (not shipped in vLLM base) ────────────────────────
+peft
+trl
+
+# ── Infrastructure ────────────────────────────────────────────────────────────
+modal
+python-dotenv
+
+# ── Dev tools ─────────────────────────────────────────────────────────────────
+black
+ruff
+pytest
+pytest-asyncio
+rich
+tqdm
+typer
+httpx

@@ -1,0 +1,28 @@
+# Packages validated in CI smoke-test (no torch/CUDA dependency).
+# torch-dependent packages (peft, trl, sae-lens) are validated
+# only in the full GPU image test, where torch is already present.
+
+# Visualization
+plotly
+seaborn
+
+# Notebooks & interactive
+jupyterlab
+ipykernel
+ipywidgets
+nbformat
+marimo
+
+# Infrastructure
+modal
+python-dotenv
+
+# Dev tools
+black
+ruff
+pytest
+pytest-asyncio
+rich
+tqdm
+typer
+httpx
