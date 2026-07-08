@@ -30,7 +30,13 @@ LABEL org.opencontainers.image.source="https://github.com/ThatE10/dev-container"
 LABEL org.opencontainers.image.description="GPU dev container — vLLM, Claude Code, PyTorch, Marimo, Jupyter"
 
 # ── System packages ───────────────────────────────────────────────────────────
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Remove the NVIDIA CUDA apt repo that ships inside the vLLM base image.
+# CUDA is already installed; keeping the repo just causes transient mirror
+# failures during apt-get update (mirror sync races on NVIDIA's CDN).
+RUN rm -f /etc/apt/sources.list.d/cuda*.list \
+          /etc/apt/sources.list.d/nvidia*.list \
+          /etc/apt/sources.list.d/*cuda* \
+    && apt-get update && apt-get install -y --no-install-recommends \
         openssh-server \
         curl \
         git \
