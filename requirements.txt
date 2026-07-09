@@ -10,11 +10,16 @@ nbformat
 marimo
 
 # ── SAE research ──────────────────────────────────────────────────────────────
-sae-lens
+# Pinned to the pre-transformers-5 line. sae-lens 6.x requires transformers 5+
+# which would force upgrading torch/transformers away from the vLLM base image.
+sae-lens<6
 
 # ── Fine-tuning / training (not shipped in vLLM base) ────────────────────────
-peft
-trl
+# Pinned to versions released against torch 2.5 / transformers 4.46 era.
+# Later releases (peft 0.19, trl 1.7) require newer torch/transformers and
+# will fight constraints.txt.
+peft<0.15
+trl<1.0
 
 # ── Infrastructure ────────────────────────────────────────────────────────────
 modal

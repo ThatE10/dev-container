@@ -29,8 +29,19 @@ FROM vllm/vllm-openai:v0.6.4 AS dev
 LABEL org.opencontainers.image.source="https://github.com/ThatE10/dev-container"
 LABEL org.opencontainers.image.description="GPU dev container — vLLM, Claude Code, PyTorch, Marimo, Jupyter"
 
+# ── python → python3 symlink ─────────────────────────────────────────────────
+# vLLM base ships Python as python3 only; the entrypoint banner and CI test
+# steps run `python …`. Without this symlink they exit 127.
+RUN ln -sf "$(command -v python3)" /usr/local/bin/python
+
 # ── System packages ───────────────────────────────────────────────────────────
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Remove the NVIDIA CUDA apt repo that ships inside the vLLM base image.
+# CUDA is already installed; keeping the repo just causes transient mirror
+# failures during apt-get update (mirror sync races on NVIDIA's CDN).
+RUN rm -f /etc/apt/sources.list.d/cuda*.list \
+          /etc/apt/sources.list.d/nvidia*.list \
+          /etc/apt/sources.list.d/*cuda* \
+    && apt-get update && apt-get install -y --no-install-recommends \
         openssh-server \
         curl \
         git \
@@ -62,13 +73,18 @@ RUN mkdir -p /var/run/sshd \
 # ── Additional Python packages ────────────────────────────────────────────────
 # Do NOT list torch / transformers / huggingface-hub / tokenizers here —
 # they ship with the base image; re-listing risks pip downgrading them.
+#
+# constraints.txt pins the base image's torch/transformers/numpy/etc. so
+# transitive deps of sae-lens/peft/trl cannot silently upgrade them and
+# invalidate vLLM's pre-compiled CUDA kernels.
 COPY requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+COPY constraints.txt  /tmp/constraints.txt
+RUN pip install --no-cache-dir -c /tmp/constraints.txt -r /tmp/requirements.txt
 
 # ── Jupyter kernel ────────────────────────────────────────────────────────────
-RUN python -m ipykernel install \
+RUN python3 -m ipykernel install \
         --name "dev-container" \
-        --display-name "Dev Container (CUDA $(nvcc --version 2>/dev/null | grep release | awk '{print $5}' | tr -d ,))"
+        --display-name "Dev Container (GPU)"
 
 # ── JupyterLab config — bind to all interfaces, no token (SSH tunnel = auth) ─
 RUN mkdir -p /root/.jupyter && cat > /root/.jupyter/jupyter_lab_config.py << 'EOF'
