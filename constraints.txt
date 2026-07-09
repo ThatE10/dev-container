@@ -15,7 +15,11 @@ torch==2.5.1
 transformers==4.46.2
 huggingface_hub==0.26.2
 tokenizers==0.20.3
-datasets==3.1.0
+# sae-lens 5.x requires datasets<3.0.0,>=2.17.1 — pinning to 3.1.0 makes
+# the resolver fail. Loosened to <3 so pip picks the latest 2.x. vLLM's
+# runtime path doesn't use datasets 3.x APIs; base image just happens to
+# ship 3.1.0 as a transitive install.
+datasets<3.0.0
 accelerate==1.1.1
 safetensors==0.4.5
 numpy<2
