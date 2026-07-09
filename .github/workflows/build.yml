@@ -96,9 +96,8 @@ jobs:
   #   runs-on: [self-hosted, gpu]
   # and add "--gpus all" to the docker run test below.
   build-and-push:
-    name: Build full image & push to ghcr.io
+    name: Build full image (push to ghcr.io on main)
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: smoke-test
 
     permissions:
@@ -130,19 +129,24 @@ jobs:
       - name: Set lowercase image name
         run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
 
-      - name: Build and push
+      # On main pushes: build → push to ghcr.io.
+      # On PRs: build → load into local Docker daemon so the test steps below
+      # can `docker run` the image without a registry round-trip.
+      - name: Build (and push on main)
         uses: docker/build-push-action@v6
         with:
           context: .
           target: dev
-          push: true
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          load: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/main') }}
           platforms: linux/amd64
           tags: |
             ${{ env.IMAGE }}:latest
             ${{ env.IMAGE }}:${{ github.sha }}
-          # Registry cache avoids re-pulling the vLLM base on every run
+          # Registry cache avoids re-pulling the vLLM base on every run.
+          # Write-back only on main; PRs read the cache but don't pollute it.
           cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache
-          cache-to:   type=registry,ref=${{ env.IMAGE }}:buildcache,mode=max
+          cache-to: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') && format('type=registry,ref={0}:buildcache,mode=max', env.IMAGE) || '' }}
 
       - name: Test full image imports (no GPU)
         run: |
