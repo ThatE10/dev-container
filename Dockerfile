@@ -72,9 +72,9 @@ COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
 # ── Jupyter kernel ────────────────────────────────────────────────────────────
-RUN python -m ipykernel install \
+RUN python3 -m ipykernel install \
         --name "dev-container" \
-        --display-name "Dev Container (CUDA $(nvcc --version 2>/dev/null | grep release | awk '{print $5}' | tr -d ,))"
+        --display-name "Dev Container (GPU)"
 
 # ── JupyterLab config — bind to all interfaces, no token (SSH tunnel = auth) ─
 RUN mkdir -p /root/.jupyter && cat > /root/.jupyter/jupyter_lab_config.py << 'EOF'
