@@ -68,8 +68,13 @@ RUN mkdir -p /var/run/sshd \
 # ── Additional Python packages ────────────────────────────────────────────────
 # Do NOT list torch / transformers / huggingface-hub / tokenizers here —
 # they ship with the base image; re-listing risks pip downgrading them.
+#
+# constraints.txt pins the base image's torch/transformers/numpy/etc. so
+# transitive deps of sae-lens/peft/trl cannot silently upgrade them and
+# invalidate vLLM's pre-compiled CUDA kernels.
 COPY requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+COPY constraints.txt  /tmp/constraints.txt
+RUN pip install --no-cache-dir -c /tmp/constraints.txt -r /tmp/requirements.txt
 
 # ── Jupyter kernel ────────────────────────────────────────────────────────────
 RUN python3 -m ipykernel install \

@@ -1,0 +1,23 @@
+# pip constraints for the `dev` Dockerfile stage.
+#
+# These pin the versions that ship inside `vllm/vllm-openai:v0.6.4` so that
+# transitive deps of sae-lens / peft / trl cannot silently upgrade them and
+# invalidate vLLM's pre-compiled CUDA kernels (FlashAttention / PagedAttention).
+#
+# If pip fails resolution against these pins, that means a package we install
+# genuinely requires a newer torch/transformers — pin the offender to an
+# older release rather than lifting a pin here.
+#
+# When bumping the vLLM base image tag, regenerate this file from
+# `pip freeze` inside the new base image.
+
+torch==2.5.1
+transformers==4.46.2
+huggingface_hub==0.26.2
+tokenizers==0.20.3
+datasets==3.1.0
+accelerate==1.1.1
+safetensors==0.4.5
+numpy<2
+pyarrow==18.0.0
+triton==3.1.0
