@@ -29,6 +29,11 @@ FROM vllm/vllm-openai:v0.6.4 AS dev
 LABEL org.opencontainers.image.source="https://github.com/ThatE10/dev-container"
 LABEL org.opencontainers.image.description="GPU dev container — vLLM, Claude Code, PyTorch, Marimo, Jupyter"
 
+# ── python → python3 symlink ─────────────────────────────────────────────────
+# vLLM base ships Python as python3 only; the entrypoint banner and CI test
+# steps run `python …`. Without this symlink they exit 127.
+RUN ln -sf "$(command -v python3)" /usr/local/bin/python
+
 # ── System packages ───────────────────────────────────────────────────────────
 # Remove the NVIDIA CUDA apt repo that ships inside the vLLM base image.
 # CUDA is already installed; keeping the repo just causes transient mirror
