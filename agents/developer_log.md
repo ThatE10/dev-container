@@ -1,5 +1,63 @@
 # Developer Log
 
+## 2026-07-21 — Browser VS Code, persistent context, easy up/down
+
+**Goal.** Make this a container you can spin up, code in, save, and relaunch
+later with everything intact — a persistent personal dev box, not a throwaway.
+
+**Changes.**
+
+1. **code-server (browser VS Code).** Installed the standalone binary in the
+   `dev` Dockerfile stage (`ARG CODE_SERVER_VERSION`, empty = latest; pinnable
+   via `--build-arg`). Exposed port **8443**. The entrypoint writes
+   `/root/.config/code-server/config.yaml` at start and launches code-server in
+   the background pointed at `/root/workspace`. Auth: uses `CODE_SERVER_PASSWORD`
+   if set, otherwise `auth: none` (same trusted-network/SSH-tunnel model already
+   used for JupyterLab). Toggle with `START_CODE_SERVER=0`.
+
+2. **Persistent context across rebuilds.** Added two named volumes in
+   `docker-compose.yml`:
+   - `dev-local → /root/.local` — captures code-server extensions/settings,
+     `pip install --user` packages, `~/.local/bin`, and shell history in one
+     volume.
+   - `claude-data → /root/.claude` — Claude Code config + chat history.
+
+   Chose `/root/.local` deliberately: it consolidates editor state + user pip
+   installs + user bins without shadowing any image-baked config (code-server
+   installs to `/usr/lib`, not `~/.local`). Did **not** volume-mount
+   site-packages or `/root` wholesale — that would shadow the base image's
+   torch/vLLM and hit the named-volume stale-config trap on rebuild. Runtime
+   `pip install --user` / project `.venv`s under `./workspace` are the
+   documented way to persist deps.
+
+   Entrypoint now also persists shell history to the `dev-local` volume
+   (`HISTFILE`, `histappend`, per-command flush) and puts `~/.local/bin` on PATH.
+
+3. **Easy up/down.** Added a `Makefile` (`up`/`down`/`shell`/`logs`/`rebuild`/
+   `status`/`new NAME=…`/`clean-context`) and a `README.md` documenting the
+   spin-up → code → save → relaunch workflow and exactly what persists vs. not.
+   Added `CODE_SERVER_PASSWORD` to `.env.example`.
+
+**CI impact.** The smoke-test job builds only the `smoke-test` stage (no
+code-server; it only lints the scripts with `bash -n`) and stayed green. The
+`build-and-push` job builds the full `dev` stage on PRs too (it just doesn't
+push unless it's a merge to `main`), so it *does* exercise the code-server
+install on this PR.
+
+**Follow-up fix (CI run 29826481698).** First push failed the full build at the
+code-server step, exit 127. Root cause: `--method standalone` installs into
+`~/.local/bin`, which isn't on `PATH` in the build `RUN`, so the `&&
+code-server --version` verification couldn't find the binary. Worse, `~/.local`
+is exactly where the `dev-local` volume mounts — the binary would have been
+shadowed by the volume and pinned to a stale version on rebuild. Fixed by
+installing with `--prefix /usr/local` (binary → `/usr/local/bin/code-server`,
+baked in the image, outside the volume) and verifying via the full path. Only
+editor user-data under `~/.local/share/code-server` now lives in the volume.
+
+**Kept GPU-required** per request — base image and GPU reservation unchanged.
+
+---
+
 ## 2026-07-09 — CI build failure investigation (run 28955705075)
 
 **Context.** GitHub Actions run for commit `f9fb648` (`Fix workflow: lowercase

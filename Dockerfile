@@ -108,6 +108,24 @@ headless = true
 theme = "dark"
 EOF
 
+# ── code-server (browser-based VS Code) ──────────────────────────────────────
+# Install the standalone binary under /usr/local (→ /usr/local/bin/code-server),
+# NOT the default ~/.local prefix. This keeps the binary baked in the image and
+# OUT of /root/.local, which docker-compose mounts as a named volume — mounting
+# over the binary would shadow it and pin a stale version across rebuilds.
+# Only the editor's user data (extensions/settings under ~/.local/share/
+# code-server) lives in that volume, so your setup survives a rebuild.
+#
+# Runtime config (bind address, auth) is written by the entrypoint so the port
+# and password can be driven from env vars.
+#
+# CODE_SERVER_VERSION empty = latest stable. Pin to a specific version (e.g.
+# 4.129.0) for reproducible builds by passing --build-arg CODE_SERVER_VERSION=…
+ARG CODE_SERVER_VERSION=
+RUN curl -fsSL https://code-server.dev/install.sh \
+        | sh -s -- --method standalone --prefix /usr/local ${CODE_SERVER_VERSION:+--version ${CODE_SERVER_VERSION}} \
+    && /usr/local/bin/code-server --version
+
 # ── HuggingFace cache (mount from host for weight persistence) ────────────────
 ENV HF_HOME=/root/.cache/huggingface
 ENV TRANSFORMERS_CACHE=/root/.cache/huggingface/transformers
@@ -122,10 +140,11 @@ RUN chmod +x /opt/scripts/*.sh
 
 # ── Ports ────────────────────────────────────────────────────────────────────
 # 22   — SSH
+# 8443 — code-server (browser VS Code)
 # 8888 — JupyterLab
 # 2719 — Marimo
 # 8080 — general / vLLM OpenAI-compat API
-EXPOSE 22 8888 2719 8080
+EXPOSE 22 8443 8888 2719 8080
 
 ENTRYPOINT ["/opt/scripts/entrypoint.sh"]
 CMD ["tail", "-f", "/dev/null"]

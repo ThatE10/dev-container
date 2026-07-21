@@ -19,19 +19,27 @@ services:
     # ── Ports ────────────────────────────────────────────────────────────────
     ports:
       - "2222:22"     # SSH  →  ssh root@localhost -p 2222
+      - "8443:8443"   # code-server (browser VS Code)  →  http://localhost:8443
       - "8888:8888"   # JupyterLab
       - "2719:2719"   # Marimo
       - "8080:8080"   # vLLM / general
 
     # ── Volumes ──────────────────────────────────────────────────────────────
+    # Everything below survives `docker compose down` and a rebuild, so you can
+    # stop the container and relaunch later with your project + context intact.
     volumes:
-      - ./workspace:/root/workspace          # your project code
-      - hf-cache:/root/.cache/huggingface    # model weights (persisted across runs)
+      - ./workspace:/root/workspace          # your project code (host bind mount)
+      - hf-cache:/root/.cache/huggingface    # model weights
+      - dev-local:/root/.local               # code-server extensions/settings,
+                                             #   `pip install --user` packages,
+                                             #   ~/.local/bin tools, shell history
+      - claude-data:/root/.claude            # Claude Code config & chat history
 
     # ── Secrets (populate from .env — see .env.example) ──────────────────────
     environment:
       SSH_PUBLIC_KEY:    ${SSH_PUBLIC_KEY:-}
       SSH_PASSWORD:      ${SSH_PASSWORD:-}
+      CODE_SERVER_PASSWORD: ${CODE_SERVER_PASSWORD:-}
       HF_TOKEN:          ${HF_TOKEN:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       MODAL_TOKEN_ID:    ${MODAL_TOKEN_ID:-}
@@ -50,3 +58,5 @@ services:
 
 volumes:
   hf-cache:
+  dev-local:
+  claude-data:
