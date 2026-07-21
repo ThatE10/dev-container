@@ -1,5 +1,55 @@
+# ── Secrets & credentials ────────────────────────────────────────────────────
+# Never commit env files, tokens, or credential blobs. .env variants first
+# because those are the most common accidental leak.
 .env
-workspace/
+.env.*
+*.env
+!.env.example
+!.env.template
+
+# Credentials / tokens (Claude Code, HuggingFace, GitHub, generic)
+.credentials.json
+credentials.json
+secrets.json
+*.secret
+.claude/
+.huggingface/
+.hf_token
+token
+
+# Modal — auth lives in ~/.modal.toml but ignore if it lands in the repo dir
+.modal.toml
+
+# SSH keys / cert material
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+*.pem
+*.key
+*.pfx
+*.p12
+
+# ── Editor / swap files (can contain in-progress secrets in memory) ──────────
+*.swp
+*.swo
+.*.swp
+.*.swo
+.vscode/
+.idea/
+
+# ── Python ───────────────────────────────────────────────────────────────────
 *.pyc
 __pycache__/
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# ── OS / misc ────────────────────────────────────────────────────────────────
 .DS_Store
+workspace/
