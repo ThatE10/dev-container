@@ -1,5 +1,49 @@
 # Developer Log
 
+## 2026-07-21 — Global ~/.claude settings sync + Modal launcher parity
+
+**Goal.** (1) Load & keep-updated global Claude Code settings in `~/.claude` from
+a git repo. (2) Bring the Modal launcher (`claude_code_modal.py`) up to parity
+with the Docker container — expose Marimo and browser VS Code, not just a
+terminal.
+
+**Settings-repo model.** Inspected `ThatE10/claude-code-settings`: it tracks
+`agents/ hooks/ skills/ memory/ .claude-tools/ tests/` and its `.gitignore`
+excludes runtime files (`settings.json`, `sessions/`, `projects/`,
+`history.jsonl`, credentials). So the repo is *designed to be* `~/.claude`.
+Chosen approach: make `~/.claude` a checkout of the repo and `git pull` each
+start. Because `~/.claude` already exists (credentials written by the entrypoint;
+it's also the `claude-data` volume), a plain `git clone` won't work (needs an
+empty dir) — so `scripts/sync-claude-settings.sh` clones `--no-checkout` into a
+temp dir, moves `.git` into `~/.claude`, then `checkout -f`. `-f` only overwrites
+*tracked* files; untracked credentials/sessions are left alone. All steps are
+best-effort (missing repo / offline / diverged branch → warn + exit 0) so the
+container always starts. Knobs: `CLAUDE_SETTINGS_REPO` (owner/repo or URL, blank
+= off), `CLAUDE_SETTINGS_BRANCH`, `CLAUDE_SETTINGS_SYNC`. Private repos use
+`GITHUB_TOKEN`. Wired into `entrypoint.sh` right after the credentials block;
+added to compose env, `.env.example`, and the CI `bash -n` lint list.
+
+> NOTE: the settings repo's `.gitignore` currently has committed merge-conflict
+> markers (`<<<<<<< / ======= / >>>>>>>`). Functionally OK (both ignore blocks
+> still apply) but should be cleaned up in that repo — out of scope here.
+
+**Modal launcher (`claude_code_modal.py`).** Added code-server (installed under
+`/usr/local`, same as the Docker image) and `marimo` (pip) to the Modal image.
+`build_startup()` now restores credentials, optionally syncs the settings repo
+(same clone→move-.git→checkout dance, inlined), backgrounds code-server + Marimo,
+and keeps ttyd in the foreground. Exposes an encrypted tunnel per surface
+(7681 terminal / 8443 VS Code / 2719 Marimo) and prints all URLs. New flags:
+`--no-code-server`, `--no-marimo`, `--claude-settings-repo`,
+`--claude-settings-branch`. `--repo` clone behaviour unchanged. (The user refers
+to this file as "launch.py"; it is `claude_code_modal.py` — no rename yet.)
+
+**CI impact.** Same as before: smoke-test builds only the smoke stage and now
+also lints `sync-claude-settings.sh`. code-server/settings changes land in the
+`dev` stage, exercised by the full build on the PR. `claude_code_modal.py` is not
+part of any image and isn't CI-tested (validated locally with `py_compile`).
+
+---
+
 ## 2026-07-21 — Browser VS Code, persistent context, easy up/down
 
 **Goal.** Make this a container you can spin up, code in, save, and relaunch

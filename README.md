@@ -102,11 +102,42 @@ CODE_SERVER_PASSWORD=some-strong-password
 
 Or tunnel instead of exposing the port: `ssh -N -L 8443:localhost:8443 root@host -p 2222`.
 
+## Global Claude Code settings
+
+On start, the container syncs a settings repo into `~/.claude` so your Claude
+Code **agents, hooks, skills, and memory are versioned and auto-updated** — the
+same setup follows you into every container. On first run it checks out the repo
+into `~/.claude`; on every start after that it `git pull`s the latest. Your
+credentials and session state are gitignored by that repo and never touched.
+
+Configure it in `.env` (defaults shown):
+
+```bash
+CLAUDE_SETTINGS_REPO=ThatE10/claude-code-settings   # owner/repo or URL; blank = off
+CLAUDE_SETTINGS_BRANCH=main
+CLAUDE_SETTINGS_SYNC=1                               # 0 disables syncing
+```
+
+Private settings repos work too — the sync uses your `GITHUB_TOKEN` when the
+repo is given as `owner/repo`.
+
+## Run on Modal (no local GPU)
+
+[`claude_code_modal.py`](claude_code_modal.py) launches the same three surfaces —
+browser VS Code, Marimo, and a web terminal with `claude` pre-authenticated — on
+[Modal](https://modal.com) instead of your own hardware. It prints a tunnel URL
+for each. See the header of that file for one-time setup, then:
+
+```bash
+python claude_code_modal.py --repo owner/repo
+```
+
 ## Secrets
 
 `make up` reads `.env`. Populate only what you use — SSH auth, `HF_TOKEN`,
-`ANTHROPIC_API_KEY`, `CLAUDE_CREDENTIALS`, Modal, W&B, GitHub. See
-[`.env.example`](.env.example) for the full list and where to get each value.
+`ANTHROPIC_API_KEY`, `CLAUDE_CREDENTIALS`, `CLAUDE_SETTINGS_REPO`, Modal, W&B,
+GitHub. See [`.env.example`](.env.example) for the full list and where to get
+each value.
 
 ## Reset your context
 

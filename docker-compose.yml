@@ -48,6 +48,10 @@ services:
       GITHUB_TOKEN:      ${GITHUB_TOKEN:-}
       SECRETS_REPO:      ${SECRETS_REPO:-}
       CLAUDE_CREDENTIALS: ${CLAUDE_CREDENTIALS:-}
+      # Global Claude Code settings repo synced into ~/.claude on start.
+      CLAUDE_SETTINGS_REPO:   ${CLAUDE_SETTINGS_REPO:-ThatE10/claude-code-settings}
+      CLAUDE_SETTINGS_BRANCH: ${CLAUDE_SETTINGS_BRANCH:-main}
+      CLAUDE_SETTINGS_SYNC:   ${CLAUDE_SETTINGS_SYNC:-1}
 
     # ── Shared memory — required for PyTorch DataLoader workers ──────────────
     shm_size: '16gb'
