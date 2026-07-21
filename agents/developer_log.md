@@ -38,10 +38,21 @@ later with everything intact — a persistent personal dev box, not a throwaway.
    spin-up → code → save → relaunch workflow and exactly what persists vs. not.
    Added `CODE_SERVER_PASSWORD` to `.env.example`.
 
-**CI impact.** None expected on PRs: the smoke-test job builds only the
-`smoke-test` stage (no code-server, no entrypoint execution — it only lints the
-scripts with `bash -n`). code-server lands in the `dev` stage, exercised by the
-full build on merge to `main`. Kept `entrypoint.sh` valid bash.
+**CI impact.** The smoke-test job builds only the `smoke-test` stage (no
+code-server; it only lints the scripts with `bash -n`) and stayed green. The
+`build-and-push` job builds the full `dev` stage on PRs too (it just doesn't
+push unless it's a merge to `main`), so it *does* exercise the code-server
+install on this PR.
+
+**Follow-up fix (CI run 29826481698).** First push failed the full build at the
+code-server step, exit 127. Root cause: `--method standalone` installs into
+`~/.local/bin`, which isn't on `PATH` in the build `RUN`, so the `&&
+code-server --version` verification couldn't find the binary. Worse, `~/.local`
+is exactly where the `dev-local` volume mounts — the binary would have been
+shadowed by the volume and pinned to a stale version on rebuild. Fixed by
+installing with `--prefix /usr/local` (binary → `/usr/local/bin/code-server`,
+baked in the image, outside the volume) and verifying via the full path. Only
+editor user-data under `~/.local/share/code-server` now lives in the volume.
 
 **Kept GPU-required** per request — base image and GPU reservation unchanged.
 

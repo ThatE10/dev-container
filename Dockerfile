@@ -109,18 +109,22 @@ theme = "dark"
 EOF
 
 # ── code-server (browser-based VS Code) ──────────────────────────────────────
-# Installs the standalone code-server binary → /usr/bin/code-server.
+# Install the standalone binary under /usr/local (→ /usr/local/bin/code-server),
+# NOT the default ~/.local prefix. This keeps the binary baked in the image and
+# OUT of /root/.local, which docker-compose mounts as a named volume — mounting
+# over the binary would shadow it and pin a stale version across rebuilds.
+# Only the editor's user data (extensions/settings under ~/.local/share/
+# code-server) lives in that volume, so your setup survives a rebuild.
+#
 # Runtime config (bind address, auth) is written by the entrypoint so the port
-# and password can be driven from env vars. Extensions + editor settings live
-# under /root/.local/share/code-server, which docker-compose persists via a
-# named volume so your setup survives a rebuild.
+# and password can be driven from env vars.
 #
 # CODE_SERVER_VERSION empty = latest stable. Pin to a specific version (e.g.
-# 4.96.4) for reproducible builds by passing --build-arg CODE_SERVER_VERSION=…
+# 4.129.0) for reproducible builds by passing --build-arg CODE_SERVER_VERSION=…
 ARG CODE_SERVER_VERSION=
 RUN curl -fsSL https://code-server.dev/install.sh \
-        | sh -s -- --method standalone ${CODE_SERVER_VERSION:+--version ${CODE_SERVER_VERSION}} \
-    && code-server --version
+        | sh -s -- --method standalone --prefix /usr/local ${CODE_SERVER_VERSION:+--version ${CODE_SERVER_VERSION}} \
+    && /usr/local/bin/code-server --version
 
 # ── HuggingFace cache (mount from host for weight persistence) ────────────────
 ENV HF_HOME=/root/.cache/huggingface
