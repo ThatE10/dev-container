@@ -123,13 +123,25 @@ repo is given as `owner/repo`.
 
 ## Run on Modal (no local GPU)
 
-[`claude_code_modal.py`](claude_code_modal.py) launches the same three surfaces —
-browser VS Code, Marimo, and a web terminal with `claude` pre-authenticated — on
-[Modal](https://modal.com) instead of your own hardware. It prints a tunnel URL
-for each. See the header of that file for one-time setup, then:
+Launch the same three surfaces — browser VS Code, Marimo, and a web terminal
+with `claude` pre-authenticated — on [Modal](https://modal.com) instead of your
+own hardware. Each gets its own tunnel URL. One-time setup is in
+[`SETUP.md`](SETUP.md).
+
+The easiest way in is the interactive launcher, which saves presets
+(GPU/CPU/RAM/repo + VS Code / Marimo / settings-repo) sorted by how often you
+use them:
 
 ```bash
-python claude_code_modal.py --repo owner/repo
+python launch.py            # pick or create a preset
+python launch.py --list     # show saved presets
+```
+
+Or call the underlying script directly:
+
+```bash
+python claude_code_modal.py --repo owner/repo --gpu A100-80GB
+python claude_code_modal.py --image slim --no-marimo      # fast CPU box, VS Code only
 ```
 
 ## Secrets

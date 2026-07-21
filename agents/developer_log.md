@@ -1,5 +1,46 @@
 # Developer Log
 
+## 2026-07-21 — Merge launch.py + advanced Modal script; wire VS Code/Marimo
+
+**Context.** The user had independently added `launch.py` (an interactive
+preset launcher) plus an *advanced* `claude_code_modal.py` — supporting
+`--gpu/--cpu/--memory/--image/--registry-secret/--secret` and
+`modal.Image.from_registry` — on the `fix-ci-pip-upgrades` branch (commit
+`3f88233`, "Launcher file"). Meanwhile this branch had enhanced the *same* file
+in a different direction (code-server + Marimo + settings-sync, multi-port).
+Two divergent versions of one file, and `launch.py` emitted flags the version
+on this branch didn't accept — so the launcher would have crashed.
+
+**Resolution.** Cherry-picked `3f88233` onto this branch (author preserved).
+That commit also carried a stronger secrets-focused `.gitignore` (superset of
+main's), a `SETUP.md`, and `einops` in requirements — all auto-merged cleanly.
+The only conflict was `claude_code_modal.py`, resolved to a **merged** version
+that keeps the advanced resource/image/secret flags *and* adds the
+code-server/Marimo/settings features:
+- `build_image()` keeps slim-vs-registry selection; code-server added to the
+  shared layer commands, Marimo via `.pip_install` (no-op on the dev-container
+  base, which already ships both).
+- `build_startup()` keeps the creds + GITHUB_TOKEN/GH_TOKEN normalization +
+  `import-secrets.sh` call, then (optionally) inlines the ~/.claude settings
+  clone/pull, backgrounds code-server + Marimo, and keeps ttyd in front.
+- Exposes an encrypted tunnel per active surface (7681/8443/2719) and prints
+  each URL. New flags: `--no-code-server`, `--no-marimo`,
+  `--claude-settings-repo/-branch`.
+
+**launch.py.** Added `code_server` / `marimo` / `settings_repo` to
+`create_preset()`, the saved-preset dict, `build_cmd()` (emits `--no-*` opt-outs
+and `--claude-settings-repo`), and `summarize()` (shows `+code+marimo` /
+`terminal-only`). All new preset reads use `.get(..., default)` so **existing
+presets.json entries keep working** — verified: an old preset with none of the
+new keys defaults both services on and never KeyErrors. Every flag `launch.py`
+emits is accepted by the merged argparse.
+
+**Validation.** `py_compile` on both scripts; functional test of
+`build_cmd`/`summarize` for new + legacy presets. The Modal scripts aren't part
+of any Docker image and aren't CI-tested.
+
+---
+
 ## 2026-07-21 — Global ~/.claude settings sync + Modal launcher parity
 
 **Goal.** (1) Load & keep-updated global Claude Code settings in `~/.claude` from
