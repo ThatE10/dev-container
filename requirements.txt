@@ -9,6 +9,9 @@ ipywidgets
 nbformat
 marimo
 
+# ── Tensor utilities ─────────────────────────────────────────────────────────
+einops
+
 # ── SAE research ──────────────────────────────────────────────────────────────
 # Pinned to the pre-transformers-5 line. sae-lens 6.x requires transformers 5+
 # which would force upgrading torch/transformers away from the vLLM base image.

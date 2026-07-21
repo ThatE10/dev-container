@@ -86,6 +86,7 @@ jobs:
           # Lint scripts locally (bash is available on the runner)
           bash -n scripts/entrypoint.sh
           bash -n scripts/import-secrets.sh
+          bash -n scripts/sync-claude-settings.sh
           echo 'Script syntax OK'
 
   # ── Job 2: Full image build → ghcr.io (main branch only) ─────────────────

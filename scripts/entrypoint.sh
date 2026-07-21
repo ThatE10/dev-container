@@ -15,6 +15,12 @@ if [ -n "${CLAUDE_CREDENTIALS:-}" ]; then
     echo "  [claude] Credentials written to ~/.claude/.credentials.json"
 fi
 
+# ── Global Claude Code settings (~/.claude from a git repo) ───────────────────
+# Clones/pulls your settings repo into ~/.claude so agents/hooks/skills/memory
+# are versioned and auto-updated on start. Runs after credentials so it never
+# clobbers them (they're untracked in that repo).
+/opt/scripts/sync-claude-settings.sh
+
 # ── SSH auth ──────────────────────────────────────────────────────────────────
 # Require at least SSH_PUBLIC_KEY or SSH_PASSWORD — no hardcoded defaults.
 if [ -z "${SSH_PUBLIC_KEY:-}" ] && [ -z "${SSH_PASSWORD:-}" ]; then
