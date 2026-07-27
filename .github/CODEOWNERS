@@ -1,0 +1,11 @@
+# Code owners for the research draft.
+#
+# The canonical draft requires review from its owner. Combined with a branch
+# protection rule on `main` that requires code-owner review, this means the
+# promote-draft PR (the only PR that ever changes paper/paper.tex) cannot merge
+# without @ThatE10's approval in the web UI.
+#
+# NOTE: CODEOWNERS is only enforced when branch protection has
+# "Require review from Code Owners" enabled -- see paper/README.md.
+
+/paper/paper.tex @ThatE10

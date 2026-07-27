@@ -12,7 +12,12 @@
 credentials.json
 secrets.json
 *.secret
-.claude/
+# Claude Code local state & credentials stay ignored, but the versioned
+# write-protection infra (shared settings + hooks) must be tracked so it
+# protects every clone and web session.
+.claude/*
+!.claude/settings.json
+!.claude/hooks/
 .huggingface/
 .hf_token
 token

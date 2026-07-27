@@ -1,0 +1,56 @@
+name: Draft isolation
+
+# Guards the canonical draft's blast radius. If a pull request touches
+# paper/paper.tex, then EVERY changed file must be inside the allowlist
+# { paper/paper.tex, paper/paper.md }. This makes the promote-draft PR the only
+# shape of PR that can legitimately modify the canonical draft, and stops the
+# canonical file from riding along inside an unrelated change.
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  isolation:
+    name: Enforce canonical-draft isolation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history for diff)
+        uses: actions/checkout@v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Check changed-file set
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          # Files changed by this PR (three-dot: changes on the PR side since the
+          # merge base). BASE_SHA/HEAD_SHA are present thanks to fetch-depth: 0.
+          files="$(git diff --name-only "${BASE_SHA}...${HEAD_SHA}")"
+          echo "Changed files in this PR:"
+          echo "${files:-<none>}"
+
+          # Only enforce when the canonical draft is part of the change.
+          if ! printf '%s\n' "$files" | grep -qx 'paper/paper.tex'; then
+            echo "paper/paper.tex is not in this PR; isolation check not applicable. OK."
+            exit 0
+          fi
+
+          # paper/paper.tex is present -> everything else must be in the allowlist.
+          violations="$(printf '%s\n' "$files" \
+            | grep -vx -e 'paper/paper.tex' -e 'paper/paper.md' || true)"
+
+          if [ -n "$violations" ]; then
+            echo "::error title=Draft isolation violated::paper/paper.tex was changed alongside files outside the allowlist { paper/paper.tex, paper/paper.md }."
+            echo "Offending files:"
+            printf '%s\n' "$violations"
+            echo
+            echo "The canonical draft may only change via the promote-draft workflow's single-file PR."
+            exit 1
+          fi
+
+          echo "paper/paper.tex change is isolated to the allowlist. OK."
