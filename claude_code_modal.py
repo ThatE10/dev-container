@@ -29,6 +29,11 @@ Usage:
   python claude_code_modal.py --repo owner/repo
   python claude_code_modal.py --gpu A100-80GB --cpu 8 --memory 32768
   python claude_code_modal.py --no-code-server --no-marimo   # terminal only
+  python claude_code_modal.py --volume my-box                # persist across runs
+
+By default the sandbox is ephemeral. Pass --volume NAME to attach persistent
+Modal Volumes (workspace, ~/.local, ~/.claude, HF cache) — mirroring the Docker
+dev container — so stopping and relaunching with the same name keeps your work.
 """
 import argparse
 import os
@@ -135,6 +140,39 @@ def build_startup(workdir: str, code_server: bool, marimo: bool,
 # clear error — remove from the list or create via `modal secret create`.
 DEFAULT_SECRETS = ["huggingface-secret", "github-secret"]
 
+# ── Persistent storage ────────────────────────────────────────────────────────
+# Mirrors the Docker dev container's named volumes. Each path below is backed by
+# a named Modal Volume so its contents survive across sandbox runs — stop the
+# sandbox, relaunch with the same volume name, and your workspace, editor
+# extensions, shell history, and Claude Code state are all still there. Modal
+# background-commits these volumes while the sandbox runs and on shutdown, so a
+# session that hits its timeout still persists its work.
+#
+# suffix → mount path. The Volume is named "<base>-<suffix>", so one base name
+# maps to a consistent set of volumes; reuse the base name to reuse the storage.
+PERSIST_MOUNTS = {
+    "workspace": "/root/workspace",           # project code + per-project .venvs
+    "local":     "/root/.local",              # code-server ext/settings, pip --user, ~/.local/bin, shell history
+    "claude":    "/root/.claude",             # Claude Code config & chat history
+    "hf":        "/root/.cache/huggingface",  # downloaded model weights
+}
+
+
+def build_volumes(volume: str | None) -> dict:
+    """Named Modal Volumes for persistent storage, keyed off a base name.
+
+    Returns {mount_path: modal.Volume}. Empty when ``volume`` is None → a fully
+    ephemeral sandbox (the previous behaviour). Volumes are created on first use
+    (``create_if_missing``) and reused on every later launch with the same base
+    name, so relaunching the same config restores its state.
+    """
+    if not volume:
+        return {}
+    return {
+        path: modal.Volume.from_name(f"{volume}-{suffix}", create_if_missing=True)
+        for suffix, path in PERSIST_MOUNTS.items()
+    }
+
 
 def main(
     repo: str | None,
@@ -151,6 +189,7 @@ def main(
     marimo: bool = True,
     settings_repo: str | None = "ThatE10/claude-code-settings",
     settings_branch: str = "main",
+    volume: str | None = None,
 ):
     app = modal.App.lookup("claude-code-server", create_if_missing=True)
 
@@ -178,6 +217,13 @@ def main(
             force_build=True,
         )
         workdir = "/root/code"
+
+    # Persistent Modal Volumes (empty dict → ephemeral). When persisting and no
+    # repo was cloned, land the editor/terminal in the persistent workspace so
+    # files created there actually survive.
+    volumes = build_volumes(volume)
+    if volume and not repo:
+        workdir = "/root/workspace"
 
     secrets = [modal.Secret.from_name("claude-code-secret")]  # CLAUDE_CREDENTIALS
     attached_names = ["claude-code-secret"]
@@ -207,7 +253,7 @@ def main(
 
     resource_summary = (
         f"image={image_base} gpu={gpu or 'none'} cpu={cpu or 'default'} "
-        f"mem={memory or 'default'}MiB"
+        f"mem={memory or 'default'}MiB storage={'vol:' + volume if volume else 'ephemeral'}"
     )
     print(f"Launching Claude Code on Modal (timeout: {hours}h, {resource_summary})...")
     with modal.enable_output():
@@ -219,6 +265,7 @@ def main(
             image=work_image,
             app=app,
             workdir=workdir,
+            volumes=volumes,
             **resource_kwargs,
         )
 
@@ -230,6 +277,11 @@ def main(
     if marimo:
         print(f"  Marimo       : {tunnels[PORT_MARIMO].url}")
     print(f"  Shell access : modal shell {sandbox.object_id}")
+    if volume:
+        print(f"  Persistent   : volume '{volume}' → workspace, ~/.local, ~/.claude, HF cache "
+              f"(relaunch with the same name to restore)")
+    else:
+        print(f"  Persistent   : none (ephemeral — pass --volume NAME to persist across runs)")
 
 
 if __name__ == "__main__":
@@ -261,6 +313,10 @@ if __name__ == "__main__":
                         help="Settings repo synced into ~/.claude (empty to disable)")
     parser.add_argument("--claude-settings-branch", default="main",
                         help="Settings repo branch (default: main)")
+    parser.add_argument("--volume", default=None, metavar="NAME",
+                        help="Base name for persistent Modal Volumes mounted at workspace, "
+                             "~/.local, ~/.claude, and the HF cache. Reusing a name restores "
+                             "that config's state across runs. Omit for an ephemeral sandbox.")
     args = parser.parse_args()
     # None → defaults; [''] → user explicitly cleared; otherwise use provided list.
     if args.secrets is None:
@@ -275,4 +331,5 @@ if __name__ == "__main__":
          extra_secrets=extra,
          code_server=args.code_server, marimo=args.marimo,
          settings_repo=args.claude_settings_repo or None,
-         settings_branch=args.claude_settings_branch)
+         settings_branch=args.claude_settings_branch,
+         volume=args.volume)

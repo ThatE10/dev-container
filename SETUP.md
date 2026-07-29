@@ -43,11 +43,25 @@ python launch.py --forget N # delete preset #N
 
 Presets are stored at `~/.config/claude-code-modal/presets.json` and sorted by
 usage count, so your most-used config is always at the top of the menu. Each
-preset stores: name, base image, GPU, CPU, RAM, repo, ref, session hours, and
-whether to attach a fresh `gh auth token` on launch.
+preset stores: name, base image, GPU, CPU, RAM, repo, ref, session hours,
+whether to attach a fresh `gh auth token` on launch, and its persistent-storage
+volume name.
 
 Tokens are never written to the preset file — the `gh auth token` value is
 resolved at launch time.
+
+### Persistent storage
+
+Presets are persistent by default. Each is backed by a named set of Modal
+Volumes — `<volume>-workspace`, `<volume>-local`, `<volume>-claude`, and
+`<volume>-hf` — mounted at `/root/workspace`, `/root/.local`, `/root/.claude`,
+and the HuggingFace cache respectively. The volume name defaults to the preset
+name; give two presets the same name to share storage, or answer "no" to the
+persistence prompt for a throwaway ephemeral box.
+
+Relaunch a preset and its files, editor extensions, shell history, model
+weights, and Claude Code state are all restored. With `claude_code_modal.py`
+directly, add `--volume NAME` to opt in (it is ephemeral otherwise).
 
 ### Direct invocation
 
