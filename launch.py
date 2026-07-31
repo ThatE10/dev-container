@@ -216,6 +216,10 @@ def build_cmd(preset: dict) -> list[str]:
     volume = preset_volume(preset)
     if volume:
         cmd += ["--volume", volume]
+    # Each preset gets its own persistent volume set, keyed by preset name, so
+    # relaunching a preset resumes its workspace and running two different
+    # presets concurrently never races on the same volume.
+    cmd += ["--volume-name", preset["name"]]
     if preset["repo"]:
         cmd += ["--repo", preset["repo"]]
         if preset.get("ref"):

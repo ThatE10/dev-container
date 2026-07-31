@@ -29,34 +29,53 @@ Usage:
   python claude_code_modal.py --repo owner/repo
   python claude_code_modal.py --gpu A100-80GB --cpu 8 --memory 32768
   python claude_code_modal.py --no-code-server --no-marimo   # terminal only
-  python claude_code_modal.py --volume my-box                # persist across runs
 
-By default the sandbox is ephemeral. Pass --volume NAME to attach persistent
-Modal Volumes (workspace, ~/.local, ~/.claude, HF cache) — mirroring the Docker
-dev container — so stopping and relaunching with the same name keeps your work.
+SSH (default on): sshd is exposed as a raw TCP tunnel so a plain `ssh` client
+works directly — more stable for long sessions than `modal shell` or the ttyd
+web terminal, which remain available as fallbacks. Auto-detects a local
+~/.ssh/id_ed25519.pub or id_rsa.pub; override with --ssh-public-key /
+--ssh-password, or disable with --no-ssh.
+
+Persistence (default on): /root/workspace, /root/.claude, /root/.local, and a
+shared HF cache are mounted as Modal Volumes, keyed by --volume-name (default:
+derived from --repo, else "default") so re-launching the same name resumes
+the same disk. Use --no-persist for a fully ephemeral sandbox.
 """
 import argparse
 import os
+from pathlib import Path
+
 import modal
 
-# ── Ports (each gets its own Modal HTTPS tunnel) ──────────────────────────────
+# ── Ports (each gets its own Modal HTTPS tunnel, except SSH — see below) ──────
 PORT_TERMINAL = 7681   # ttyd web terminal
 PORT_CODE     = 8443   # code-server (browser VS Code)
 PORT_MARIMO   = 2719   # Marimo
+PORT_SSH      = 22     # sshd — forwarded as a raw TCP (unencrypted) tunnel, not HTTPS
 
 DEFAULT_IMAGE = "ghcr.io/thate10/dev-container:latest"
 
-# Layers added on top of any base — Node, Claude Code CLI, ttyd, code-server.
-# code-server installs under /usr/local (on PATH); harmless if the base (the
-# dev-container image) already ships it. Marimo is added via pip_install below.
+# Layers added on top of any base — Node, Claude Code CLI, ttyd, code-server,
+# sshd. code-server installs under /usr/local (on PATH); harmless if the base
+# (the dev-container image) already ships it. Marimo is added via pip_install
+# below. openssh-server + sshd_config tweaks are applied here (not just relied
+# on from the dev-container Dockerfile) so `--image slim` and arbitrary
+# `--image <tag>` bases get working SSH too.
 _LAYER_CMDS = (
     "curl -fsSL https://deb.nodesource.com/setup_20.x | bash -",
-    "apt-get install -y nodejs",
+    "apt-get install -y nodejs openssh-server",
     "npm install -g @anthropic-ai/claude-code",
     "curl -fsSL https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.x86_64"
     " -o /usr/local/bin/ttyd && chmod +x /usr/local/bin/ttyd",
     "curl -fsSL https://code-server.dev/install.sh"
     " | sh -s -- --method standalone --prefix /usr/local",
+    "mkdir -p /var/run/sshd",
+    "sed -i "
+    "-e 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' "
+    "-e 's/#PasswordAuthentication yes/PasswordAuthentication yes/' "
+    "-e 's/PasswordAuthentication no/PasswordAuthentication yes/' "
+    "/etc/ssh/sshd_config",
+    "printf '\\nX11Forwarding yes\\nAllowTcpForwarding yes\\n' >> /etc/ssh/sshd_config",
 )
 
 
@@ -66,7 +85,8 @@ def build_image(base: str, registry_secret_name: str | None) -> modal.Image:
     base = 'slim' → debian_slim (fast, CPU-only, no CUDA userspace).
     base = 'ghcr.io/...' or any tag → pull that image; needs a Modal registry secret
     for private registries. dev-container's ENTRYPOINT is stripped so we control
-    startup directly instead of going through its SSH/banner setup.
+    startup directly instead of going through its SSH/banner setup — sshd is
+    started explicitly at sandbox startup (see build_startup) instead.
     """
     if base == "slim":
         img = modal.Image.debian_slim().apt_install("curl", "git", "bash", "python3")
@@ -83,12 +103,27 @@ def build_image(base: str, registry_secret_name: str | None) -> modal.Image:
     )
 
 
-def build_startup(workdir: str, code_server: bool, marimo: bool,
-                  settings_repo: str | None, settings_branch: str) -> str:
-    """Bash run at sandbox start: restore creds, import secrets, optionally sync
-    ~/.claude, launch VS Code + Marimo in the background, keep ttyd in front."""
+def resolve_ssh_public_key(raw: str | None) -> str | None:
+    """raw may be actual key text, a path to a .pub file, or None (auto-detect
+    the caller's local ~/.ssh/id_ed25519.pub / id_rsa.pub)."""
+    if raw:
+        p = Path(raw).expanduser()
+        return p.read_text().strip() if p.exists() else raw.strip()
+    for name in ("id_ed25519.pub", "id_rsa.pub"):
+        p = Path.home() / ".ssh" / name
+        if p.exists():
+            return p.read_text().strip()
+    return None
+
+
+def build_startup(base_dir: str, work_dir: str, code_server: bool, marimo: bool, ssh: bool,
+                  settings_repo: str | None, settings_branch: str,
+                  repo: str | None, ref: str, clone_dir: str | None) -> str:
+    """Bash run at sandbox start: restore creds, import secrets, clone the repo
+    (idempotent — skipped if already present on a persistent volume), optionally
+    sync ~/.claude, bring up sshd, launch VS Code + Marimo in the background."""
     lines = [
-        "mkdir -p ~/.claude",
+        f'mkdir -p "{base_dir}" ~/.claude',
         # Credentials: raw JSON blob from the macOS Keychain. On Linux without a
         # keychain, Claude Code falls back to ~/.claude/.credentials.json.
         "printf '%s' \"$CLAUDE_CREDENTIALS\" > ~/.claude/.credentials.json",
@@ -99,6 +134,57 @@ def build_startup(workdir: str, code_server: bool, marimo: bool,
         # dev-container base ships this importer; slim doesn't (|| true keeps going).
         "([ -x /opt/scripts/import-secrets.sh ] && /opt/scripts/import-secrets.sh || true)",
     ]
+
+    if repo and clone_dir:
+        # Runs at startup (not image build) so the clone lands on the mounted
+        # persistent volume and survives restarts. Only clones once — on a
+        # persistent volume, later launches just resume the existing checkout.
+        lines += [
+            "git config --global advice.detachedHead false",
+            f'if [ ! -d "{clone_dir}/.git" ]; then',
+            '  if [ -n "$GH_TOKEN" ]; then',
+            f'    GIT_ASKPASS=echo git clone --quiet --depth 1 --branch {ref} '
+            f'"https://oauth2:${{GH_TOKEN}}@github.com/{repo}.git" "{clone_dir}"',
+            '  else',
+            f'    GIT_TERMINAL_PROMPT=0 git clone --quiet --depth 1 --branch {ref} '
+            f'"https://github.com/{repo}.git" "{clone_dir}"',
+            '  fi',
+            # $? here is the exit status of whichever clone command the
+            # if/else above just ran — don't claim success unconditionally.
+            '  if [ $? -eq 0 ]; then',
+            f'    echo "[repo] cloned {repo}@{ref} -> {clone_dir}"',
+            '  else',
+            f'    echo "[repo] ERROR: git clone of {repo}@{ref} failed — check the ref '
+            f'exists and GH_TOKEN has access" >&2',
+            '  fi',
+            'else',
+            f'  echo "[repo] {clone_dir} already present (persistent volume) — resuming as-is"',
+            'fi',
+        ]
+
+    if ssh:
+        lines += [
+            "mkdir -p /var/run/sshd",
+            "ssh-keygen -A > /dev/null 2>&1 || true",  # idempotent: skips existing host keys
+            'if [ -n "${SSH_PUBLIC_KEY:-}" ]; then',
+            '  mkdir -p /root/.ssh && chmod 700 /root/.ssh',
+            '  touch /root/.ssh/authorized_keys',
+            '  grep -qxF "$SSH_PUBLIC_KEY" /root/.ssh/authorized_keys'
+            ' || printf \'%s\\n\' "$SSH_PUBLIC_KEY" >> /root/.ssh/authorized_keys',
+            '  chmod 600 /root/.ssh/authorized_keys',
+            '  echo "[ssh] public key installed"',
+            'fi',
+            'if [ -n "${SSH_PASSWORD:-}" ]; then',
+            '  printf \'root:%s\' "$SSH_PASSWORD" | chpasswd',
+            "  sed -i 's/^#\\?PasswordAuthentication.*/PasswordAuthentication yes/'"
+            " /etc/ssh/sshd_config",
+            '  echo "[ssh] password auth enabled"',
+            'fi',
+            'if [ -z "${SSH_PUBLIC_KEY:-}" ] && [ -z "${SSH_PASSWORD:-}" ]; then',
+            '  echo "[ssh] WARNING: no SSH_PUBLIC_KEY or SSH_PASSWORD — sshd will start'
+            ' but no login will succeed." >&2',
+            'fi',
+        ]
 
     if settings_repo:
         # Make ~/.claude a checkout of the settings repo and keep it fresh.
@@ -115,23 +201,41 @@ def build_startup(workdir: str, code_server: bool, marimo: bool,
             'if git clone -q --branch "$CS_BRANCH" --no-checkout "$CS_URL" "$T/r" 2>/dev/null; then '
             'mv "$T/r/.git" ~/.claude/.git && git -C ~/.claude checkout -f "$CS_BRANCH" 2>/dev/null '
             '&& echo "[claude-settings] cloned $CS_REPO"; fi; rm -rf "$T"; fi',
-            'git -C ~/.claude pull -q --ff-only origin "$CS_BRANCH" 2>/dev/null '
-            '&& echo "[claude-settings] updated ~/.claude" || true',
+            # Re-point origin + branch on EVERY launch, not just the first clone,
+            # so changing --claude-settings-repo/--claude-settings-branch on a
+            # reused --volume-name actually takes effect instead of silently
+            # sticking to whatever origin/branch this volume's ~/.claude was
+            # first populated with.
+            'if [ -d ~/.claude/.git ]; then '
+            'git -C ~/.claude remote set-url origin "$CS_URL" 2>/dev/null '
+            '|| git -C ~/.claude remote add origin "$CS_URL" 2>/dev/null; '
+            'git -C ~/.claude fetch -q origin "$CS_BRANCH" 2>/dev/null '
+            '&& git -C ~/.claude checkout -q -B "$CS_BRANCH" "origin/$CS_BRANCH" 2>/dev/null '
+            '&& echo "[claude-settings] synced ~/.claude to $CS_REPO@$CS_BRANCH" '
+            '|| echo "[claude-settings] WARNING: could not sync $CS_REPO@$CS_BRANCH'
+            ' (keeping existing checkout)" >&2; fi',
         ]
 
     if code_server:
         lines.append(
             f"code-server --auth none --bind-addr 0.0.0.0:{PORT_CODE} "
-            f"--disable-telemetry {workdir} > /tmp/code-server.log 2>&1 &"
+            f"--disable-telemetry {work_dir} > /tmp/code-server.log 2>&1 &"
         )
     if marimo:
         lines.append(
-            f"( cd {workdir} && marimo edit --headless --host 0.0.0.0 "
+            f"( cd {work_dir} && marimo edit --headless --host 0.0.0.0 "
             f"--port {PORT_MARIMO} --no-token > /tmp/marimo.log 2>&1 ) &"
         )
 
-    # ttyd stays in the foreground so the sandbox stays alive.
-    lines.append(f"exec ttyd -W -p {PORT_TERMINAL} bash")
+    # Exactly one process stays in the foreground to keep the sandbox alive.
+    # sshd is the default (more stable than the ttyd terminal or `modal shell`
+    # for long-running work) — ttyd still runs in the background for the
+    # browser terminal. With --no-ssh, ttyd takes over the foreground instead.
+    if ssh:
+        lines.append(f"ttyd -W -p {PORT_TERMINAL} bash > /tmp/ttyd.log 2>&1 &")
+        lines.append(f"exec /usr/sbin/sshd -D -e -p {PORT_SSH}")
+    else:
+        lines.append(f"exec ttyd -W -p {PORT_TERMINAL} bash")
     return "\n".join(lines)
 
 
@@ -172,6 +276,10 @@ def build_volumes(volume: str | None) -> dict:
         path: modal.Volume.from_name(f"{volume}-{suffix}", create_if_missing=True)
         for suffix, path in PERSIST_MOUNTS.items()
     }
+# Base directory for the persistent workspace volume. Repo clones land in
+# BASE_DIR/code; everything else in BASE_DIR is yours to use as scratch space
+# that survives sandbox restarts (unlike the rest of the filesystem).
+BASE_DIR = "/root/workspace"
 
 
 def main(
@@ -190,33 +298,21 @@ def main(
     settings_repo: str | None = "ThatE10/claude-code-settings",
     settings_branch: str = "main",
     volume: str | None = None,
+    ssh: bool = True,
+    ssh_public_key: str | None = None,
+    ssh_password: str | None = None,
+    persist: bool = True,
+    volume_name: str | None = None,
+    hf_cache_volume: str = "claude-code-hf-cache",
 ):
     app = modal.App.lookup("claude-code-server", create_if_missing=True)
 
     # A registry secret only makes sense for a real registry pull.
     secret_name = registry_secret if image_base != "slim" else None
     work_image = build_image(image_base, secret_name)
-    workdir = "/root"
 
-    if repo:
-        token = github_token or os.environ.get("GH_TOKEN")
-        if token:
-            clone_cmd = (
-                f"GIT_ASKPASS=echo git clone --quiet --depth 1 --branch {ref} "
-                f"https://oauth2:{token}@github.com/{repo}.git /root/code"
-            )
-        else:
-            clone_cmd = (
-                f"GIT_TERMINAL_PROMPT=0 git clone --quiet --depth 1 --branch {ref} "
-                f"https://github.com/{repo}.git /root/code"
-            )
-
-        work_image = work_image.run_commands(
-            "git config --global advice.detachedHead false",
-            clone_cmd,
-            force_build=True,
-        )
-        workdir = "/root/code"
+    clone_dir = f"{BASE_DIR}/code" if repo else None
+    work_dir = clone_dir or BASE_DIR
 
     # Persistent Modal Volumes (empty dict → ephemeral). When persisting and no
     # repo was cloned, land the editor/terminal in the persistent workspace so
@@ -233,6 +329,20 @@ def main(
     if github_token or os.environ.get("GH_TOKEN"):
         secrets.append(modal.Secret.from_dict({"GH_TOKEN": github_token or os.environ["GH_TOKEN"]}))
         attached_names.append("GH_TOKEN (ephemeral)")
+
+    resolved_key = resolve_ssh_public_key(ssh_public_key) if ssh else None
+    if ssh:
+        ssh_secret_dict = {}
+        if resolved_key:
+            ssh_secret_dict["SSH_PUBLIC_KEY"] = resolved_key
+        if ssh_password:
+            ssh_secret_dict["SSH_PASSWORD"] = ssh_password
+        if ssh_secret_dict:
+            secrets.append(modal.Secret.from_dict(ssh_secret_dict))
+            attached_names.append("SSH auth (ephemeral)")
+        else:
+            print("⚠️  No SSH key found (~/.ssh/id_ed25519.pub or id_rsa.pub) and no "
+                  "--ssh-password given — sshd will start but no login will succeed.")
     print(f"Attaching secrets: {', '.join(attached_names)}")
 
     resource_kwargs = {}
@@ -243,7 +353,24 @@ def main(
     if memory is not None:
         resource_kwargs["memory"] = memory
 
-    startup = build_startup(workdir, code_server, marimo, settings_repo, settings_branch)
+    volumes = {}
+    if persist:
+        slug = (volume_name or repo or "default").strip().lower()
+        slug = "".join(c if c.isalnum() or c == "-" else "-" for c in slug).strip("-")
+        volumes = {
+            BASE_DIR: modal.Volume.from_name(f"ccm-{slug}-workspace", create_if_missing=True),
+            "/root/.claude": modal.Volume.from_name(f"ccm-{slug}-claude", create_if_missing=True),
+            "/root/.local": modal.Volume.from_name(f"ccm-{slug}-local", create_if_missing=True),
+            "/root/.cache/huggingface": modal.Volume.from_name(hf_cache_volume, create_if_missing=True),
+        }
+        print(f"Persistent storage: ccm-{slug}-{{workspace,claude,local}} + shared "
+              f"'{hf_cache_volume}'. Reuse the same --volume-name to resume; don't run two "
+              f"sandboxes with the same --volume-name at once (concurrent writers race).")
+    else:
+        print("Persistent storage: disabled (--no-persist) — sandbox filesystem is ephemeral.")
+
+    startup = build_startup(BASE_DIR, work_dir, code_server, marimo, ssh,
+                            settings_repo, settings_branch, repo, ref, clone_dir)
 
     ports = [PORT_TERMINAL]
     if code_server:
@@ -256,6 +383,22 @@ def main(
         f"mem={memory or 'default'}MiB storage={'vol:' + volume if volume else 'ephemeral'}"
     )
     print(f"Launching Claude Code on Modal (timeout: {hours}h, {resource_summary})...")
+    sandbox_kwargs = dict(
+        encrypted_ports=ports,
+        secrets=secrets,
+        timeout=hours * 3600,
+        image=work_image,
+        app=app,
+        workdir=work_dir,
+        volumes=volumes,
+        **resource_kwargs,
+    )
+    if ssh:
+        # Raw TCP, not TLS-wrapped like encrypted_ports — a plain `ssh` client
+        # can connect directly, unlike the encrypted tunnels which need an
+        # HTTP(S)/TLS-aware client.
+        sandbox_kwargs["unencrypted_ports"] = [PORT_SSH]
+
     with modal.enable_output():
         sandbox = modal.Sandbox.create(
             "bash", "-c", startup,
@@ -282,6 +425,11 @@ def main(
               f"(relaunch with the same name to restore)")
     else:
         print(f"  Persistent   : none (ephemeral — pass --volume NAME to persist across runs)")
+    if ssh:
+        ssh_host, ssh_port = tunnels[PORT_SSH].tcp_socket
+        print(f"  SSH          : ssh root@{ssh_host} -p {ssh_port}")
+    shell_note = "  (fallback if SSH won't connect)" if ssh else ""
+    print(f"  Shell access : modal shell {sandbox.object_id}{shell_note}")
 
 
 if __name__ == "__main__":
@@ -317,6 +465,26 @@ if __name__ == "__main__":
                         help="Base name for persistent Modal Volumes mounted at workspace, "
                              "~/.local, ~/.claude, and the HF cache. Reusing a name restores "
                              "that config's state across runs. Omit for an ephemeral sandbox.")
+    parser.add_argument("--no-ssh", dest="ssh", action="store_false",
+                        help="Don't start sshd (falls back to ttyd as the foreground process, "
+                             "and `modal shell` as the only remote-shell option)")
+    parser.add_argument("--ssh-public-key", default=None,
+                        help="Public key (raw text or path to a .pub file) allowed to SSH in as "
+                             "root. Default: auto-detect ~/.ssh/id_ed25519.pub or id_rsa.pub")
+    parser.add_argument("--ssh-password", default=None,
+                        help="Also (or instead) enable SSH password auth for root")
+    parser.add_argument("--no-persist", dest="persist", action="store_false",
+                        help="Ephemeral sandbox storage only — no Modal Volumes, nothing survives "
+                             "a restart")
+    parser.add_argument("--volume-name", default=None,
+                        help="Slug identifying this sandbox's persistent volumes (workspace, "
+                             "~/.claude, ~/.local). Default: derived from --repo, else 'default'. "
+                             "Give concurrently-running sandboxes distinct names — two sandboxes "
+                             "sharing a volume-name will race on writes.")
+    parser.add_argument("--hf-cache-volume", default="claude-code-hf-cache",
+                        help="Modal Volume name for the shared HuggingFace weights cache "
+                             "(default: claude-code-hf-cache; shared across all sandboxes since "
+                             "it's mostly read-only after first download)")
     args = parser.parse_args()
     # None → defaults; [''] → user explicitly cleared; otherwise use provided list.
     if args.secrets is None:
@@ -333,3 +501,6 @@ if __name__ == "__main__":
          settings_repo=args.claude_settings_repo or None,
          settings_branch=args.claude_settings_branch,
          volume=args.volume)
+         ssh=args.ssh, ssh_public_key=args.ssh_public_key, ssh_password=args.ssh_password,
+         persist=args.persist, volume_name=args.volume_name,
+         hf_cache_volume=args.hf_cache_volume)
