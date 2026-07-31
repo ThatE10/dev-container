@@ -2,6 +2,8 @@
 
 launch.py imports only the stdlib, so these run without any stubbing.
 """
+from pathlib import Path
+
 import pytest
 
 import launch
@@ -164,3 +166,43 @@ class TestRemoveFlow:
         launch.remove_flow(presets)
         assert [p["name"] for p in presets] == ["a"]
         assert not saved
+
+
+class TestEnsureSSHKey:
+    def test_detects_existing_key(self, tmp_path, monkeypatch):
+        (tmp_path / "id_ed25519.pub").write_text("ssh-ed25519 EXISTING\n")
+        assert launch.has_ssh_key(tmp_path) is True
+        # ssh-keygen must NOT run when a key already exists.
+        monkeypatch.setattr(launch.subprocess, "run",
+                            lambda *a, **k: pytest.fail("ssh-keygen should not run"))
+        assert launch.ensure_ssh_key(tmp_path) is True
+
+    def test_detects_rsa_key(self, tmp_path):
+        (tmp_path / "id_rsa.pub").write_text("ssh-rsa EXISTING\n")
+        assert launch.has_ssh_key(tmp_path) is True
+
+    def test_no_key_reports_false_dir(self, tmp_path):
+        assert launch.has_ssh_key(tmp_path) is False
+
+    def test_generates_when_missing(self, tmp_path, monkeypatch):
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            # Simulate ssh-keygen writing the keypair.
+            Path(cmd[cmd.index("-f") + 1] + ".pub").write_text("ssh-ed25519 NEW\n")
+            return None
+
+        monkeypatch.setattr(launch.subprocess, "run", fake_run)
+        assert launch.ensure_ssh_key(tmp_path) is True
+        assert len(calls) == 1
+        assert calls[0][0] == "ssh-keygen"
+        assert "-N" in calls[0] and calls[0][calls[0].index("-N") + 1] == ""  # no passphrase
+        assert (tmp_path / "id_ed25519.pub").exists()
+
+    def test_generation_failure_returns_false(self, tmp_path, monkeypatch):
+        def boom(*a, **k):
+            raise FileNotFoundError("ssh-keygen not installed")
+
+        monkeypatch.setattr(launch.subprocess, "run", boom)
+        assert launch.ensure_ssh_key(tmp_path) is False

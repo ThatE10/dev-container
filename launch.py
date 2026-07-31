@@ -64,6 +64,47 @@ def preset_volume(p: dict) -> str | None:
     return p.get("volume") or slugify(p["name"])
 
 
+# Public keys claude_code_modal.py auto-detects for sandbox SSH access.
+SSH_PUBKEY_NAMES = ("id_ed25519.pub", "id_rsa.pub")
+
+
+def has_ssh_key(ssh_dir: Path | None = None) -> bool:
+    """True if a public key the sandbox will auto-detect already exists."""
+    d = ssh_dir or (Path.home() / ".ssh")
+    return any((d / name).exists() for name in SSH_PUBKEY_NAMES)
+
+
+def ensure_ssh_key(ssh_dir: Path | None = None) -> bool:
+    """Make sure a usable SSH public key exists so the sandbox's sshd accepts
+    logins. If none is found, generate a passwordless ed25519 keypair. Returns
+    True if a key is present (found or freshly created), False if generation
+    failed (SSH login is then unavailable — the web terminal / `modal shell`
+    still work). SSH auth is key-based; no password is set."""
+    d = ssh_dir or (Path.home() / ".ssh")
+    if has_ssh_key(d):
+        return True
+    d.mkdir(parents=True, exist_ok=True)
+    try:
+        d.chmod(0o700)
+    except OSError:
+        pass
+    key_path = d / "id_ed25519"
+    print(f"  no SSH key found — generating {key_path} for sandbox SSH access...")
+    try:
+        subprocess.run(
+            ["ssh-keygen", "-t", "ed25519", "-f", str(key_path), "-N", "",
+             "-C", "claude-code-modal"],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        detail = (getattr(e, "stderr", "") or str(e)).strip()
+        print(f"  ⚠️  couldn't generate an SSH key ({detail}); SSH login will be "
+              f"unavailable — use the web terminal or `modal shell` instead.")
+        return False
+    print(f"  created {key_path}.pub — it'll be installed as an authorized key (no password).")
+    return True
+
+
 def load_presets() -> list[dict]:
     if not PRESETS_FILE.exists():
         return []
@@ -230,6 +271,11 @@ def build_cmd(preset: dict) -> list[str]:
 
 
 def launch(preset: dict) -> int:
+    # SSH is on by default downstream; make sure a key exists so login works
+    # (auto-generates one if the machine has none). Skipped if the preset
+    # disables SSH.
+    if preset.get("ssh", True):
+        ensure_ssh_key()
     cmd = build_cmd(preset)
     # Don't echo the gh token if present.
     printable = [("<gh-token>" if i > 0 and cmd[i - 1] == "--github-token" else a)
