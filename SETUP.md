@@ -64,6 +64,63 @@ python claude_code_modal.py \
 python claude_code_modal.py --image slim
 ```
 
+## Connecting
+
+The launcher prints all the ways in when the sandbox comes up:
+
+```
+SSH          : ssh root@<host> -p <port>
+Web terminal : https://....modal.host   (bash shell, type `claude`)
+VS Code      : https://....modal.host
+Marimo       : https://....modal.host
+Shell access : modal shell <sandbox-id>  (fallback if SSH won't connect)
+```
+
+**SSH is the recommended way in** — it's a real TCP tunnel (`unencrypted_ports`
+in Modal terms — no TLS wrapping, so any normal `ssh` client just works),
+carries a proper terminal, and survives disconnects/reconnects better than the
+ttyd web terminal or `modal shell`, which stay available as fallbacks.
+
+Auth: the launcher auto-detects `~/.ssh/id_ed25519.pub` / `~/.ssh/id_rsa.pub`
+on your machine and installs it as an authorized key for `root`. Override with
+`--ssh-public-key <text-or-path>`, add `--ssh-password <pw>` for password auth
+too, or `--no-ssh` to disable sshd entirely (falls back to ttyd as the
+keep-alive process). If neither a key nor a password resolves, sshd still
+starts but nothing can log in — the launcher warns you when that happens.
+
+## Persistent storage
+
+By default each sandbox mounts four [Modal
+Volumes](https://modal.com/docs/guide/volumes): `/root/workspace` (your repo
+clone + scratch space), `/root/.claude` (Claude Code config/history —
+including the settings-repo checkout), `/root/.local` (code-server extensions,
+`pip install --user` packages), and a shared HF weights cache. Modal
+background-commits volume writes every few seconds and on shutdown, so nothing
+special is needed to save your work — just don't `rm` the volume.
+
+Volumes are named `ccm-<slug>-{workspace,claude,local}`, where `<slug>` comes
+from `--volume-name` (the interactive launcher passes your **preset name**
+automatically), falling back to `--repo` or `default`. Relaunching the same
+preset/`--volume-name` reattaches the same disks — repo clone, shell state,
+and Claude session all resume where you left off, even after a crash or a
+`--hours` timeout.
+
+Pass `--no-persist` for a fully ephemeral sandbox (nothing survives a
+restart) — useful for quick, throwaway runs.
+
+### Running multiple agents at once
+
+Each preset/`--volume-name` maps to its own volume set, so running **different
+presets concurrently is safe** — separate sandboxes, separate disks, no shared
+state. Don't launch two sandboxes with the *same* `--volume-name` at the same
+time, though: Modal allows concurrent mounts, but writes from two live
+containers to the same volume aren't reconciled and can clobber each other.
+
+If you want several Claude agents collaborating on the *same* checkout inside
+one sandbox, isolate them with `git worktree add` under `/root/workspace/code`
+rather than pointing multiple agents at one working tree — that's a git
+feature, not something this launcher wires up automatically.
+
 ## Secrets attached to the sandbox
 
 Beyond `claude-code-secret` (always) and `ghcr-secret` (for the image pull),
