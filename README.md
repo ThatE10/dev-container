@@ -123,10 +123,12 @@ repo is given as `owner/repo`.
 
 ## Run on Modal (no local GPU)
 
-Launch the same three surfaces — browser VS Code, Marimo, and a web terminal
+Launch the same surfaces — SSH, browser VS Code, Marimo, and a web terminal
 with `claude` pre-authenticated — on [Modal](https://modal.com) instead of your
-own hardware. Each gets its own tunnel URL. One-time setup is in
-[`SETUP.md`](SETUP.md).
+own hardware. Each gets its own tunnel URL, and (unlike a bare Modal sandbox)
+the workspace, `~/.claude`, and `~/.local` persist on Modal Volumes across
+restarts, so it behaves like a real preconfigured GPU VM you can stop and
+resume. One-time setup is in [`SETUP.md`](SETUP.md).
 
 The easiest way in is the interactive launcher, which saves presets
 (GPU/CPU/RAM/repo + VS Code / Marimo / settings-repo) sorted by how often you

@@ -175,6 +175,10 @@ def build_cmd(preset: dict) -> list[str]:
     # Global ~/.claude settings repo — empty string disables the sync downstream.
     settings_repo = preset.get("settings_repo", "ThatE10/claude-code-settings")
     cmd += ["--claude-settings-repo", settings_repo or ""]
+    # Each preset gets its own persistent volume set, keyed by preset name, so
+    # relaunching a preset resumes its workspace and running two different
+    # presets concurrently never races on the same volume.
+    cmd += ["--volume-name", preset["name"]]
     if preset["repo"]:
         cmd += ["--repo", preset["repo"]]
         if preset.get("ref"):
