@@ -2,9 +2,14 @@
 """
 Interactive launcher for claude_code_modal.py.
 
-Saves presets (GPU/CPU/RAM/repo/ref/hours + VS Code / Marimo / settings-repo)
-to ~/.config/claude-code-modal/presets.json and shows them sorted by usage
-count so your most-used config is always at the top.
+Saves presets (GPU/CPU/RAM/repo/ref/hours + VS Code / Marimo / settings-repo +
+persistent volume) to ~/.config/claude-code-modal/presets.json and shows them
+sorted by usage count so your most-used config is always at the top.
+
+Presets are persistent by default: each one is backed by a named set of Modal
+Volumes (workspace, ~/.local, ~/.claude, HF cache), so relaunching the same
+preset restores its files, editor extensions, shell history, and Claude state —
+no more ephemeral sandboxes. The volume name defaults to the preset name.
 
   python launch.py            # menu
   python launch.py --list     # print presets, exit
@@ -12,6 +17,7 @@ count so your most-used config is always at the top.
 """
 import argparse
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -38,6 +44,24 @@ GPU_CHOICES = [
     ("H100",         "H100"),
     ("H200",         "H200"),
 ]
+
+
+def slugify(name: str) -> str:
+    """Turn a preset name into a valid Modal Volume base name."""
+    slug = re.sub(r"[^a-z0-9-]+", "-", name.lower()).strip("-")
+    return slug or "dev-box"
+
+
+def preset_volume(p: dict) -> str | None:
+    """The persistent-volume base name for a preset, or None if ephemeral.
+
+    Presets are persistent by default; a missing ``persist`` key (older presets)
+    is treated as True so they gain persistence keyed to their name. The volume
+    name defaults to the slugified preset name.
+    """
+    if not p.get("persist", True):
+        return None
+    return p.get("volume") or slugify(p["name"])
 
 
 def load_presets() -> list[dict]:
@@ -121,6 +145,13 @@ def create_preset() -> dict:
     secrets_raw = prompt("extra Modal secrets (comma-separated, blank = none)",
                          ",".join(DEFAULT_EXTRA_SECRETS))
     extra_secrets = [s.strip() for s in (secrets_raw or "").split(",") if s.strip()]
+    persist = yesno("persistent storage (survives relaunch)?", True)
+    volume = None
+    if persist:
+        default_vol = slugify(name)
+        volume = prompt("volume name (reuse across presets to share storage)",
+                        default_vol) or default_vol
+        volume = slugify(volume)
     return {
         "name": name,
         "image": image,
@@ -135,6 +166,8 @@ def create_preset() -> dict:
         "settings_repo": settings_repo,
         "use_gh_token": use_gh_token,
         "extra_secrets": extra_secrets,
+        "persist": persist,
+        "volume": volume,
         "count": 0,
     }
 
@@ -147,9 +180,11 @@ def summarize(p: dict) -> str:
     svc = [s for s, on in (("code", p.get("code_server", True)),
                            ("marimo", p.get("marimo", True))) if on]
     svc_s = "+" + "+".join(svc) if svc else "terminal-only"
+    vol = preset_volume(p)
+    store = f" · vol:{vol}" if vol else " · ephemeral"
     used = p.get("count", 0)
     return (f"{p['name']:<22} [{img_short}] {gpu:<12} {p['cpu']}c {p['memory']}Mi · "
-            f"{p['hours']}h {svc_s}{repo}  (used {used}×)")
+            f"{p['hours']}h {svc_s}{store}{repo}  (used {used}×)")
 
 
 def build_cmd(preset: dict) -> list[str]:
@@ -175,6 +210,12 @@ def build_cmd(preset: dict) -> list[str]:
     # Global ~/.claude settings repo — empty string disables the sync downstream.
     settings_repo = preset.get("settings_repo", "ThatE10/claude-code-settings")
     cmd += ["--claude-settings-repo", settings_repo or ""]
+    # Persistent storage — a named Modal Volume set keyed to this preset. Reusing
+    # the same volume name across launches restores workspace / ~/.local /
+    # ~/.claude / HF cache. Omitted → ephemeral sandbox.
+    volume = preset_volume(preset)
+    if volume:
+        cmd += ["--volume", volume]
     # Each preset gets its own persistent volume set, keyed by preset name, so
     # relaunching a preset resumes its workspace and running two different
     # presets concurrently never races on the same volume.

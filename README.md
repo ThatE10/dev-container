@@ -146,6 +146,32 @@ python claude_code_modal.py --repo owner/repo --gpu A100-80GB
 python claude_code_modal.py --image slim --no-marimo      # fast CPU box, VS Code only
 ```
 
+### Persistent storage on Modal
+
+Presets launched through `launch.py` are **persistent by default** — the same
+context that survives `make down` locally now survives a Modal sandbox
+shutdown too. Each preset is backed by a named set of Modal Volumes mirroring
+the Docker volumes above:
+
+| Persisted                                     | Mounted at              |
+| --------------------------------------------- | ----------------------- |
+| Project code + per-project `.venv`s           | `/root/workspace`       |
+| code-server extensions/settings, shell history, `pip install --user` | `/root/.local` |
+| Claude Code config & chat history             | `/root/.claude`         |
+| Downloaded model weights (HuggingFace)        | `/root/.cache/huggingface` |
+
+The volume name defaults to the preset name, so relaunching the same preset
+restores its state; two presets that share a volume name share storage. Modal
+commits these volumes in the background and on shutdown, so a session that hits
+its timeout still keeps its work.
+
+With `claude_code_modal.py` directly, the sandbox is ephemeral unless you pass
+`--volume NAME`:
+
+```bash
+python claude_code_modal.py --volume my-box --gpu A100-80GB   # persists across runs
+```
+
 ## Secrets
 
 `make up` reads `.env`. Populate only what you use — SSH auth, `HF_TOKEN`,
