@@ -29,6 +29,17 @@ Usage:
   python claude_code_modal.py --repo owner/repo
   python claude_code_modal.py --gpu A100-80GB --cpu 8 --memory 32768
   python claude_code_modal.py --no-code-server --no-marimo   # terminal only
+
+SSH (default on): sshd is exposed as a raw TCP tunnel so a plain `ssh` client
+works directly — more stable for long sessions than `modal shell` or the ttyd
+web terminal, which remain available as fallbacks. Auto-detects a local
+~/.ssh/id_ed25519.pub or id_rsa.pub; override with --ssh-public-key /
+--ssh-password, or disable with --no-ssh.
+
+Persistence (default on): /root/workspace, /root/.claude, /root/.local, and a
+shared HF cache are mounted as Modal Volumes, keyed by --volume-name (default:
+derived from --repo, else "default") so re-launching the same name resumes
+the same disk. Use --no-persist for a fully ephemeral sandbox.
 """
 import argparse
 import os
@@ -138,7 +149,14 @@ def build_startup(base_dir: str, work_dir: str, code_server: bool, marimo: bool,
             f'    GIT_TERMINAL_PROMPT=0 git clone --quiet --depth 1 --branch {ref} '
             f'"https://github.com/{repo}.git" "{clone_dir}"',
             '  fi',
-            f'  echo "[repo] cloned {repo}@{ref} -> {clone_dir}"',
+            # $? here is the exit status of whichever clone command the
+            # if/else above just ran — don't claim success unconditionally.
+            '  if [ $? -eq 0 ]; then',
+            f'    echo "[repo] cloned {repo}@{ref} -> {clone_dir}"',
+            '  else',
+            f'    echo "[repo] ERROR: git clone of {repo}@{ref} failed — check the ref '
+            f'exists and GH_TOKEN has access" >&2',
+            '  fi',
             'else',
             f'  echo "[repo] {clone_dir} already present (persistent volume) — resuming as-is"',
             'fi',
@@ -183,8 +201,19 @@ def build_startup(base_dir: str, work_dir: str, code_server: bool, marimo: bool,
             'if git clone -q --branch "$CS_BRANCH" --no-checkout "$CS_URL" "$T/r" 2>/dev/null; then '
             'mv "$T/r/.git" ~/.claude/.git && git -C ~/.claude checkout -f "$CS_BRANCH" 2>/dev/null '
             '&& echo "[claude-settings] cloned $CS_REPO"; fi; rm -rf "$T"; fi',
-            'git -C ~/.claude pull -q --ff-only origin "$CS_BRANCH" 2>/dev/null '
-            '&& echo "[claude-settings] updated ~/.claude" || true',
+            # Re-point origin + branch on EVERY launch, not just the first clone,
+            # so changing --claude-settings-repo/--claude-settings-branch on a
+            # reused --volume-name actually takes effect instead of silently
+            # sticking to whatever origin/branch this volume's ~/.claude was
+            # first populated with.
+            'if [ -d ~/.claude/.git ]; then '
+            'git -C ~/.claude remote set-url origin "$CS_URL" 2>/dev/null '
+            '|| git -C ~/.claude remote add origin "$CS_URL" 2>/dev/null; '
+            'git -C ~/.claude fetch -q origin "$CS_BRANCH" 2>/dev/null '
+            '&& git -C ~/.claude checkout -q -B "$CS_BRANCH" "origin/$CS_BRANCH" 2>/dev/null '
+            '&& echo "[claude-settings] synced ~/.claude to $CS_REPO@$CS_BRANCH" '
+            '|| echo "[claude-settings] WARNING: could not sync $CS_REPO@$CS_BRANCH'
+            ' (keeping existing checkout)" >&2; fi',
         ]
 
     if code_server:
@@ -343,7 +372,8 @@ def main(
     if ssh:
         ssh_host, ssh_port = tunnels[PORT_SSH].tcp_socket
         print(f"  SSH          : ssh root@{ssh_host} -p {ssh_port}")
-    print(f"  Shell access : modal shell {sandbox.object_id}  (fallback if SSH won't connect)")
+    shell_note = "  (fallback if SSH won't connect)" if ssh else ""
+    print(f"  Shell access : modal shell {sandbox.object_id}{shell_note}")
 
 
 if __name__ == "__main__":
