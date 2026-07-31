@@ -7,6 +7,28 @@ on:
     branches: [main]
 
 jobs:
+  # ── Job 0: Python unit tests (runs on every push/PR, no Docker/GPU) ───────
+  # Tests the pure-Python launcher + Modal script logic (preset → command,
+  # volume naming, startup script, SSH/persist wiring). `modal` is stubbed by
+  # the repo-root conftest.py, so no Modal auth or network is needed.
+  unit-tests:
+    name: Python unit tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test deps
+        run: python -m pip install --upgrade pip pytest
+
+      - name: Run unit tests
+        run: python -m pytest
+
   # ── Job 1: Smoke test (runs on every push/PR, no GPU needed) ─────────────
   # Builds only the `smoke-test` stage (python:3.12-slim base, ~200MB).
   # Validates that our requirements.txt packages install and import correctly.
@@ -99,7 +121,7 @@ jobs:
   build-and-push:
     name: Build full image (push to ghcr.io on main)
     runs-on: ubuntu-latest
-    needs: smoke-test
+    needs: [unit-tests, smoke-test]
 
     permissions:
       contents: read

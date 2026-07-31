@@ -11,7 +11,7 @@ Volumes (workspace, ~/.local, ~/.claude, HF cache), so relaunching the same
 preset restores its files, editor extensions, shell history, and Claude state —
 no more ephemeral sandboxes. The volume name defaults to the preset name.
 
-  python launch.py            # menu
+  python launch.py            # menu (also offers [new preset] / [remove a preset])
   python launch.py --list     # print presets, exit
   python launch.py --forget N # delete preset #N
 """
@@ -210,16 +210,15 @@ def build_cmd(preset: dict) -> list[str]:
     # Global ~/.claude settings repo — empty string disables the sync downstream.
     settings_repo = preset.get("settings_repo", "ThatE10/claude-code-settings")
     cmd += ["--claude-settings-repo", settings_repo or ""]
-    # Persistent storage — a named Modal Volume set keyed to this preset. Reusing
-    # the same volume name across launches restores workspace / ~/.local /
-    # ~/.claude / HF cache. Omitted → ephemeral sandbox.
-    volume = preset_volume(preset)
-    if volume:
-        cmd += ["--volume", volume]
-    # Each preset gets its own persistent volume set, keyed by preset name, so
-    # relaunching a preset resumes its workspace and running two different
-    # presets concurrently never races on the same volume.
-    cmd += ["--volume-name", preset["name"]]
+    # Persistent storage — each preset maps to its own Modal Volume set, keyed by
+    # the preset's volume name, so relaunching a preset resumes its workspace /
+    # ~/.claude / ~/.local and two different presets never race on one volume.
+    # preset_volume() returns None for an explicitly ephemeral preset.
+    vol = preset_volume(preset)
+    if vol:
+        cmd += ["--volume-name", vol]
+    else:
+        cmd += ["--no-persist"]
     if preset["repo"]:
         cmd += ["--repo", preset["repo"]]
         if preset.get("ref"):
@@ -247,48 +246,88 @@ def cmd_list(presets: list[dict]) -> None:
         print(f"  {i}) {summarize(p)}")
 
 
+def delete_preset_at(presets: list[dict], idx: int) -> dict:
+    """Remove the preset shown at 1-based position ``idx`` (in the list's current
+    order) and return it. Raises IndexError if ``idx`` is out of range."""
+    if not 1 <= idx <= len(presets):
+        raise IndexError(idx)
+    return presets.pop(idx - 1)
+
+
 def cmd_forget(presets: list[dict], idx: int) -> None:
     presets.sort(key=lambda p: -p.get("count", 0))
-    if not 1 <= idx <= len(presets):
+    try:
+        removed = delete_preset_at(presets, idx)
+    except IndexError:
         print(f"no preset #{idx}.")
         sys.exit(1)
-    removed = presets.pop(idx - 1)
     save_presets(presets)
     print(f"forgot preset: {removed['name']}")
 
 
-def menu(presets: list[dict]) -> None:
-    presets.sort(key=lambda p: -p.get("count", 0))
-
-    print("Claude Code on Modal — launcher\n")
-    for i, p in enumerate(presets, 1):
-        print(f"  {i}) {summarize(p)}")
-    new_idx = len(presets) + 1
-    print(f"  {new_idx}) [new preset]")
-
+def remove_flow(presets: list[dict]) -> None:
+    """Interactive removal: ask which preset to delete, then delete it. Operates
+    on ``presets`` in its current (already-sorted) order so the numbers shown in
+    the menu match. No-op on blank/invalid input."""
     if not presets:
-        choice = str(new_idx)
-    else:
-        choice = input(f"\nchoose [1-{new_idx}] (default 1): ").strip() or "1"
-
+        print("  no presets to remove.")
+        return
+    raw = input(f"  remove which? [1-{len(presets)}] (blank = cancel): ").strip()
+    if not raw:
+        print("  cancelled.")
+        return
     try:
-        idx = int(choice) - 1
-    except ValueError:
-        print("invalid choice.")
-        sys.exit(1)
-
-    if idx == len(presets):
-        preset = create_preset()
-        presets.append(preset)
-    elif 0 <= idx < len(presets):
-        preset = presets[idx]
-    else:
-        print("invalid choice.")
-        sys.exit(1)
-
-    preset["count"] = preset.get("count", 0) + 1
+        removed = delete_preset_at(presets, int(raw))
+    except (ValueError, IndexError):
+        print(f"  no preset #{raw}.")
+        return
     save_presets(presets)
-    sys.exit(launch(preset))
+    print(f"  forgot preset: {removed['name']}")
+
+
+def menu(presets: list[dict]) -> None:
+    # Loops so that removing a preset redraws the menu instead of exiting;
+    # picking or creating a preset launches and exits.
+    while True:
+        presets.sort(key=lambda p: -p.get("count", 0))
+
+        print("Claude Code on Modal — launcher\n")
+        for i, p in enumerate(presets, 1):
+            print(f"  {i}) {summarize(p)}")
+        new_idx = len(presets) + 1
+        print(f"  {new_idx}) [new preset]")
+        remove_idx = new_idx + 1 if presets else None
+        if remove_idx:
+            print(f"  {remove_idx}) [remove a preset]")
+
+        if not presets:
+            choice = str(new_idx)
+        else:
+            choice = input(f"\nchoose [1-{remove_idx}] (default 1): ").strip() or "1"
+
+        try:
+            idx = int(choice) - 1
+        except ValueError:
+            print("invalid choice.")
+            sys.exit(1)
+
+        if remove_idx is not None and idx == remove_idx - 1:
+            remove_flow(presets)
+            print()  # spacer before the menu redraws
+            continue
+
+        if idx == len(presets):
+            preset = create_preset()
+            presets.append(preset)
+        elif 0 <= idx < len(presets):
+            preset = presets[idx]
+        else:
+            print("invalid choice.")
+            sys.exit(1)
+
+        preset["count"] = preset.get("count", 0) + 1
+        save_presets(presets)
+        sys.exit(launch(preset))
 
 
 def main() -> None:

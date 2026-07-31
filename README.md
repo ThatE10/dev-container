@@ -165,11 +165,13 @@ restores its state; two presets that share a volume name share storage. Modal
 commits these volumes in the background and on shutdown, so a session that hits
 its timeout still keeps its work.
 
-With `claude_code_modal.py` directly, the sandbox is ephemeral unless you pass
-`--volume NAME`:
+With `claude_code_modal.py` directly, storage is persistent by default (keyed by
+`--volume-name`, falling back to the repo name); pass `--no-persist` for a
+throwaway box:
 
 ```bash
-python claude_code_modal.py --volume my-box --gpu A100-80GB   # persists across runs
+python claude_code_modal.py --volume-name my-box --gpu A100-80GB   # resume with the same name
+python claude_code_modal.py --no-persist --image slim             # ephemeral
 ```
 
 ## Secrets
