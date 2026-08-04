@@ -38,6 +38,7 @@ Claude.ai OAuth (no API key needed).
 ```bash
 python launch.py            # menu — pick a saved preset or create one
 python launch.py --list     # print presets, most-used first
+python launch.py --volumes  # print storage volumes and which presets use them
 python launch.py --forget N # delete preset #N
 ```
 
@@ -56,12 +57,21 @@ Presets are persistent by default. Each is backed by a named set of Modal
 Volumes — `<volume>-workspace`, `<volume>-local`, `<volume>-claude`, and
 `<volume>-hf` — mounted at `/root/workspace`, `/root/.local`, `/root/.claude`,
 and the HuggingFace cache respectively. The volume name defaults to the preset
-name; give two presets the same name to share storage, or answer "no" to the
-persistence prompt for a throwaway ephemeral box.
+name, but presets and volumes are decoupled: creating a preset opens a volume
+picker listing the volumes your other presets use — pick one to share storage
+between presets, type a new name, or choose the ephemeral option for a
+throwaway box.
+
+At launch time, append `v` to your menu choice (e.g. `1v`) to run a preset on
+a different volume for just that session, or save the change back to the
+preset when prompted. `python launch.py --volumes` lists every volume and
+which presets use it. Don't run two sandboxes on the same volume at once —
+concurrent writers race.
 
 Relaunch a preset and its files, editor extensions, shell history, model
 weights, and Claude Code state are all restored. With `claude_code_modal.py`
-directly, add `--volume NAME` to opt in (it is ephemeral otherwise).
+directly, pick the volume set with `--volume-name NAME` (persistent by
+default; pass `--no-persist` for an ephemeral box).
 
 ### Direct invocation
 
