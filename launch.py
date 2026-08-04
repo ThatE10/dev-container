@@ -9,10 +9,16 @@ sorted by usage count so your most-used config is always at the top.
 Presets are persistent by default: each one is backed by a named set of Modal
 Volumes (workspace, ~/.local, ~/.claude, HF cache), so relaunching the same
 preset restores its files, editor extensions, shell history, and Claude state —
-no more ephemeral sandboxes. The volume name defaults to the preset name.
+no more ephemeral sandboxes. The volume name defaults to the preset name, but
+any preset can point at any volume: creating a preset opens a volume picker
+listing every volume your presets already use (so two presets can share one
+set of storage volumes), and appending 'v' to a menu choice (e.g. '1v')
+relaunches that preset on a different volume — one-off, or saved back to the
+preset if you say so.
 
   python launch.py            # menu (also offers [new preset] / [remove a preset])
   python launch.py --list     # print presets, exit
+  python launch.py --volumes  # print storage volumes and which presets use them
   python launch.py --forget N # delete preset #N
 """
 import argparse
@@ -62,6 +68,16 @@ def preset_volume(p: dict) -> str | None:
     if not p.get("persist", True):
         return None
     return p.get("volume") or slugify(p["name"])
+
+
+def known_volumes(presets: list[dict]) -> dict[str, list[str]]:
+    """Map each persistent-volume name to the presets that use it."""
+    vols: dict[str, list[str]] = {}
+    for p in presets:
+        v = preset_volume(p)
+        if v:
+            vols.setdefault(v, []).append(p["name"])
+    return vols
 
 
 # Public keys claude_code_modal.py auto-detects for sandbox SSH access.
@@ -165,7 +181,90 @@ def choose_gpu() -> str | None:
     return f"{base}:{n}" if n and n != "1" else base
 
 
-def create_preset() -> dict:
+def choose_volume(presets: list[dict], default: str | None = None,
+                  title: str = "storage volume",
+                  current_preset: str | None = None) -> tuple[bool, str | None]:
+    """Interactive picker for a preset's persistent storage.
+
+    Lists every volume referenced by existing presets so storage can be reused
+    across presets, plus an option to type a fresh name and one for no
+    persistence at all. Also accepts a volume name typed directly at the
+    prompt. Returns ``(persist, volume)``: ``(True, <slug>)``, or
+    ``(False, None)`` for an ephemeral box.
+
+    ``default`` preselects a volume name (None preselects ephemeral);
+    ``current_preset`` is excluded from the "shares storage with" note so a
+    preset relaunching on its own volume isn't warned about itself.
+    """
+    vols = known_volumes(presets)
+    names = sorted(vols)
+
+    def _pick(name: str) -> tuple[bool, str]:
+        sharers = [u for u in vols.get(name, []) if u != current_preset]
+        if sharers:
+            print(f"    ↳ shares storage with: {', '.join(sharers)} — don't run "
+                  f"two sandboxes on one volume at the same time.")
+        return True, name
+
+    print(f"\n  {title}:")
+    for i, n in enumerate(names, 1):
+        print(f"    {i}) {n}  (used by: {', '.join(vols[n])})")
+    new_idx = len(names) + 1
+    eph_idx = new_idx + 1
+    print(f"    {new_idx}) [new volume name]")
+    print(f"    {eph_idx}) [ephemeral — no persistent storage]")
+
+    if default is None:
+        default_idx = eph_idx
+    elif default in names:
+        default_idx = names.index(default) + 1
+    else:
+        default_idx = new_idx
+
+    while True:
+        raw = input(f"    choose [1-{eph_idx}] or type a name "
+                    f"(default {default_idx}): ").strip() or str(default_idx)
+        try:
+            choice = int(raw)
+        except ValueError:
+            if not any(c.isalnum() for c in raw):  # would slugify to the fallback
+                print("    invalid choice.")
+                continue
+            return _pick(slugify(raw))
+        if 1 <= choice <= len(names):
+            return _pick(names[choice - 1])
+        if choice == new_idx:
+            fallback = default if (default and default not in names) else None
+            name = prompt("volume name", fallback)
+            if name:
+                return _pick(slugify(name))
+            print("    a volume name is required (or pick the ephemeral option).")
+            continue
+        if choice == eph_idx:
+            return False, None
+        print("    invalid choice.")
+
+
+def override_volume_flow(presets: list[dict], preset: dict) -> tuple[bool, str | None]:
+    """Pick the storage volume for one launch of ``preset``.
+
+    Shows the volume picker and returns the ``(persist, volume)`` pair to
+    launch with. If the choice differs from the preset's stored storage,
+    offers to save it back to the preset (the caller persists via
+    ``save_presets``); declining keeps the override one-off.
+    """
+    current = preset_volume(preset)
+    picked = choose_volume(
+        presets, default=current, current_preset=preset["name"],
+        title=(f"storage volume for this '{preset['name']}' launch "
+               f"(currently: {'vol:' + current if current else 'ephemeral'})"))
+    if picked != (current is not None, current):
+        if yesno(f"save this storage choice to preset '{preset['name']}'?", False):
+            preset["persist"], preset["volume"] = picked
+    return picked
+
+
+def create_preset(presets: list[dict]) -> dict:
     print("\n── new preset ──")
     name = prompt("name (e.g. 'sae-lens-a100')")
     if not name:
@@ -186,13 +285,9 @@ def create_preset() -> dict:
     secrets_raw = prompt("extra Modal secrets (comma-separated, blank = none)",
                          ",".join(DEFAULT_EXTRA_SECRETS))
     extra_secrets = [s.strip() for s in (secrets_raw or "").split(",") if s.strip()]
-    persist = yesno("persistent storage (survives relaunch)?", True)
-    volume = None
-    if persist:
-        default_vol = slugify(name)
-        volume = prompt("volume name (reuse across presets to share storage)",
-                        default_vol) or default_vol
-        volume = slugify(volume)
+    persist, volume = choose_volume(
+        presets, default=slugify(name),
+        title="storage volume (reuse an existing one to share storage between presets)")
     return {
         "name": name,
         "image": image,
@@ -292,6 +387,16 @@ def cmd_list(presets: list[dict]) -> None:
         print(f"  {i}) {summarize(p)}")
 
 
+def cmd_volumes(presets: list[dict]) -> None:
+    vols = known_volumes(presets)
+    if not vols:
+        print("no persistent volumes referenced by any preset.")
+        return
+    for name in sorted(vols):
+        print(f"  {name:<24} used by: {', '.join(vols[name])}")
+    print("\n(each name maps to Modal Volumes ccm-<name>-{workspace,claude,local})")
+
+
 def delete_preset_at(presets: list[dict], idx: int) -> dict:
     """Remove the preset shown at 1-based position ``idx`` (in the list's current
     order) and return it. Raises IndexError if ``idx`` is out of range."""
@@ -349,7 +454,14 @@ def menu(presets: list[dict]) -> None:
         if not presets:
             choice = str(new_idx)
         else:
-            choice = input(f"\nchoose [1-{remove_idx}] (default 1): ").strip() or "1"
+            choice = input(f"\nchoose [1-{remove_idx}] (default 1; append 'v' to pick "
+                           f"the storage volume, e.g. '1v'): ").strip() or "1"
+
+        # 'Nv' launches preset N on a volume you pick (one-off unless saved);
+        # a bare 'v' means the default preset with the volume picker.
+        pick_volume = choice.lower().endswith("v")
+        if pick_volume:
+            choice = choice[:-1].strip() or "1"
 
         try:
             idx = int(choice) - 1
@@ -362,30 +474,40 @@ def menu(presets: list[dict]) -> None:
             print()  # spacer before the menu redraws
             continue
 
+        launch_volume = None  # (persist, volume) override for this launch only
         if idx == len(presets):
-            preset = create_preset()
+            preset = create_preset(presets)  # volume picked during creation
             presets.append(preset)
         elif 0 <= idx < len(presets):
             preset = presets[idx]
+            if pick_volume:
+                launch_volume = override_volume_flow(presets, preset)
         else:
             print("invalid choice.")
             sys.exit(1)
 
         preset["count"] = preset.get("count", 0) + 1
         save_presets(presets)
-        sys.exit(launch(preset))
+        run = dict(preset)
+        if launch_volume is not None:
+            run["persist"], run["volume"] = launch_volume
+        sys.exit(launch(run))
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--list", action="store_true", help="Print presets and exit")
+    parser.add_argument("--volumes", action="store_true",
+                        help="Print storage volumes and which presets use them, then exit")
     parser.add_argument("--forget", type=int, metavar="N", help="Delete preset #N")
     args = parser.parse_args()
 
     presets = load_presets()
     if args.list:
         cmd_list(presets)
+    elif args.volumes:
+        cmd_volumes(presets)
     elif args.forget is not None:
         cmd_forget(presets, args.forget)
     else:

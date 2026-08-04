@@ -32,6 +32,13 @@ def _preset(**over):
     return base
 
 
+def _feed(monkeypatch, answers):
+    """Script builtins.input with a fixed sequence of answers. Running out of
+    answers raises StopIteration, failing any test that prompts unexpectedly."""
+    it = iter(answers)
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(it))
+
+
 class TestSlugify:
     def test_spaces_and_case(self):
         assert launch.slugify("SAE Lens A100") == "sae-lens-a100"
@@ -60,6 +67,167 @@ class TestPresetVolume:
     def test_legacy_preset_without_keys_defaults_persistent(self):
         legacy = {"name": "old preset"}  # predates persist/volume keys
         assert launch.preset_volume(legacy) == "old-preset"
+
+
+class TestKnownVolumes:
+    def test_groups_presets_by_volume(self):
+        presets = [_preset(name="alpha", volume="shared"),
+                   _preset(name="beta", volume="shared"),
+                   _preset(name="gamma", volume=None)]  # falls back to slug(name)
+        assert launch.known_volumes(presets) == {
+            "shared": ["alpha", "beta"],
+            "gamma": ["gamma"],
+        }
+
+    def test_skips_ephemeral_presets(self):
+        assert launch.known_volumes([_preset(name="alpha", persist=False)]) == {}
+
+    def test_empty(self):
+        assert launch.known_volumes([]) == {}
+
+
+class TestChooseVolume:
+    """Picker options for these presets: 1) alpha  2) shared  3) [new]  4) [ephemeral]."""
+
+    @pytest.fixture
+    def presets(self):
+        return [_preset(name="alpha", volume="alpha"),
+                _preset(name="beta", volume="shared"),
+                _preset(name="gamma", volume="shared")]
+
+    def test_pick_existing_by_number(self, presets, monkeypatch):
+        _feed(monkeypatch, ["2"])
+        assert launch.choose_volume(presets) == (True, "shared")
+
+    def test_enter_picks_default_volume(self, presets, monkeypatch):
+        _feed(monkeypatch, [""])
+        assert launch.choose_volume(presets, default="shared") == (True, "shared")
+
+    def test_new_name_is_slugified(self, presets, monkeypatch):
+        _feed(monkeypatch, ["3", "My Vol"])
+        assert launch.choose_volume(presets) == (True, "my-vol")
+
+    def test_ephemeral_option(self, presets, monkeypatch):
+        _feed(monkeypatch, ["4"])
+        assert launch.choose_volume(presets) == (False, None)
+
+    def test_typed_name_accepted_directly(self, presets, monkeypatch):
+        _feed(monkeypatch, ["Shared Storage!"])
+        assert launch.choose_volume(presets) == (True, "shared-storage")
+
+    def test_symbol_only_input_rejected(self, presets, monkeypatch):
+        _feed(monkeypatch, ["!!!", "4"])  # garbage re-prompts instead of 'dev-box'
+        assert launch.choose_volume(presets) == (False, None)
+
+    def test_unknown_default_flows_to_new_name_prompt(self, presets, monkeypatch):
+        # default not among known volumes → [new volume name] preselected, and
+        # accepting the name prompt's default keeps it.
+        _feed(monkeypatch, ["", ""])
+        assert launch.choose_volume(presets, default="fresh") == (True, "fresh")
+
+    def test_no_presets_defaults_to_ephemeral(self, monkeypatch):
+        _feed(monkeypatch, [""])
+        assert launch.choose_volume([]) == (False, None)
+
+    def test_no_presets_new_name(self, monkeypatch):
+        _feed(monkeypatch, ["1", "box"])
+        assert launch.choose_volume([]) == (True, "box")
+
+    def test_shared_pick_warns_about_other_users(self, presets, monkeypatch, capsys):
+        _feed(monkeypatch, ["2"])
+        launch.choose_volume(presets, current_preset="beta")
+        out = capsys.readouterr().out
+        assert "shares storage with: gamma" in out
+        assert "beta" not in out.split("shares storage with:")[1].splitlines()[0]
+
+    def test_own_volume_pick_has_no_warning(self, presets, monkeypatch, capsys):
+        _feed(monkeypatch, ["1"])
+        launch.choose_volume(presets, default="alpha", current_preset="alpha")
+        assert "shares storage with" not in capsys.readouterr().out
+
+
+class TestOverrideVolumeFlow:
+    @pytest.fixture
+    def presets(self):
+        return [_preset(name="alpha", volume="alpha"),
+                _preset(name="beta", volume="shared")]
+
+    def test_one_off_override_leaves_preset_untouched(self, presets, monkeypatch):
+        _feed(monkeypatch, ["2", "n"])  # pick 'shared', don't save
+        assert launch.override_volume_flow(presets, presets[0]) == (True, "shared")
+        assert presets[0]["volume"] == "alpha"
+        assert presets[0]["persist"] is True
+
+    def test_save_updates_preset(self, presets, monkeypatch):
+        _feed(monkeypatch, ["2", "y"])  # pick 'shared', save to preset
+        assert launch.override_volume_flow(presets, presets[0]) == (True, "shared")
+        assert presets[0]["volume"] == "shared"
+        assert presets[0]["persist"] is True
+
+    def test_unchanged_choice_skips_save_prompt(self, presets, monkeypatch):
+        _feed(monkeypatch, ["1"])  # re-pick own volume; no save prompt expected
+        assert launch.override_volume_flow(presets, presets[0]) == (True, "alpha")
+        assert presets[0]["volume"] == "alpha"
+
+    def test_ephemeral_override(self, presets, monkeypatch):
+        _feed(monkeypatch, ["4", ""])  # ephemeral, decline save (default no)
+        assert launch.override_volume_flow(presets, presets[0]) == (False, None)
+        assert presets[0]["volume"] == "alpha"
+        assert presets[0].get("persist", True) is True
+
+
+class TestMenuVolumeSuffix:
+    """End-to-end through menu(): 'Nv' opens the picker, plain N doesn't."""
+
+    @pytest.fixture
+    def env(self, monkeypatch):
+        presets = [_preset(name="alpha", volume="alpha", count=5),
+                   _preset(name="beta", volume="shared")]
+        launched = []
+        monkeypatch.setattr(launch, "launch", lambda p: launched.append(p) or 0)
+        monkeypatch.setattr(launch, "save_presets", lambda p: None)
+        return presets, launched
+
+    def test_suffix_launches_on_picked_volume(self, env, monkeypatch):
+        presets, launched = env
+        _feed(monkeypatch, ["1v", "2", "n"])  # preset 1, volume 'shared', one-off
+        with pytest.raises(SystemExit) as e:
+            launch.menu(presets)
+        assert e.value.code == 0
+        assert launch.preset_volume(launched[0]) == "shared"
+        assert presets[0]["volume"] == "alpha"  # stored preset untouched
+        assert presets[0]["count"] == 6
+
+    def test_bare_v_means_default_preset_with_picker(self, env, monkeypatch):
+        presets, launched = env
+        _feed(monkeypatch, ["v", ""])  # default preset, keep its own volume
+        with pytest.raises(SystemExit) as e:
+            launch.menu(presets)
+        assert e.value.code == 0
+        assert launch.preset_volume(launched[0]) == "alpha"
+
+    def test_plain_choice_never_prompts_for_volume(self, env, monkeypatch):
+        presets, launched = env
+        _feed(monkeypatch, ["1"])  # any further prompt would raise StopIteration
+        with pytest.raises(SystemExit) as e:
+            launch.menu(presets)
+        assert e.value.code == 0
+        assert launch.preset_volume(launched[0]) == "alpha"
+
+
+class TestCmdVolumes:
+    def test_lists_volumes_and_users(self, capsys):
+        presets = [_preset(name="alpha", volume="shared"),
+                   _preset(name="beta", volume="shared"),
+                   _preset(name="solo", volume=None)]
+        launch.cmd_volumes(presets)
+        out = capsys.readouterr().out
+        assert "shared" in out and "alpha, beta" in out
+        assert "solo" in out
+
+    def test_no_volumes(self, capsys):
+        launch.cmd_volumes([_preset(persist=False)])
+        assert "no persistent volumes" in capsys.readouterr().out
 
 
 class TestBuildCmd:

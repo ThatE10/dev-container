@@ -137,6 +137,7 @@ use them:
 ```bash
 python launch.py            # pick or create a preset
 python launch.py --list     # show saved presets
+python launch.py --volumes  # show storage volumes and which presets share them
 ```
 
 Or call the underlying script directly:
@@ -161,9 +162,13 @@ the Docker volumes above:
 | Downloaded model weights (HuggingFace)        | `/root/.cache/huggingface` |
 
 The volume name defaults to the preset name, so relaunching the same preset
-restores its state; two presets that share a volume name share storage. Modal
-commits these volumes in the background and on shutdown, so a session that hits
-its timeout still keeps its work.
+restores its state — but presets and volumes are decoupled. Creating a preset
+opens a volume picker listing every volume your presets already use, so two
+presets can share one set of storage volumes; append `v` to a menu choice
+(e.g. `1v`) to relaunch a preset on a different volume — one-off, or saved
+back to the preset. Modal commits these volumes in the background and on
+shutdown, so a session that hits its timeout still keeps its work. (Don't run
+two sandboxes on the same volume at once — concurrent writers race.)
 
 With `claude_code_modal.py` directly, storage is persistent by default (keyed by
 `--volume-name`, falling back to the repo name); pass `--no-persist` for a
