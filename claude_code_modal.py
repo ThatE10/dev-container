@@ -43,6 +43,7 @@ the same disk. Use --no-persist for a fully ephemeral sandbox.
 """
 import argparse
 import os
+import sys
 from pathlib import Path
 
 import modal
@@ -77,6 +78,17 @@ _LAYER_CMDS = (
     "/etc/ssh/sshd_config",
     "printf '\\nX11Forwarding yes\\nAllowTcpForwarding yes\\n' >> /etc/ssh/sshd_config",
 )
+
+
+# Where build_startup writes a batch command before running it. Outside the
+# workspace volume on purpose — it's per-launch scratch, not something to
+# resurrect on the next sandbox that mounts the same volume.
+BATCH_SCRIPT = "/tmp/ccm-batch.sh"
+
+
+def _shq(s: str) -> str:
+    """Single-quote a string for safe interpolation into the startup script."""
+    return "'" + str(s).replace("'", "'\\''") + "'"
 
 
 def build_image(base: str, registry_secret_name: str | None) -> modal.Image:
@@ -118,10 +130,30 @@ def resolve_ssh_public_key(raw: str | None) -> str | None:
 
 def build_startup(base_dir: str, work_dir: str, code_server: bool, marimo: bool, ssh: bool,
                   settings_repo: str | None, settings_branch: str,
-                  repo: str | None, ref: str, clone_dir: str | None) -> str:
+                  repo: str | None, ref: str, clone_dir: str | None,
+                  post_clone: str | None = None, run_cmd: str | None = None,
+                  exit_on_finish: bool = False) -> str:
     """Bash run at sandbox start: restore creds, import secrets, clone the repo
     (idempotent — skipped if already present on a persistent volume), optionally
-    sync ~/.claude, bring up sshd, launch VS Code + Marimo in the background."""
+    sync ~/.claude, bring up sshd, launch VS Code + Marimo in the background.
+
+    Two shapes of sandbox come out of this:
+
+    * **interactive** (``run_cmd=None``) — the historical behaviour. The last
+      line is a foreground keep-alive (``exec sshd``, or ``exec ttyd`` with
+      ``--no-ssh``) so the sandbox lives until its timeout.
+    * **batch** (``run_cmd`` set) — ``run_cmd`` runs in ``work_dir`` with its
+      output teed to ``<base_dir>/.last_run.log``. With ``exit_on_finish`` the
+      script then exits with the command's status and the sandbox tears itself
+      down (Slurm-style: commission, run, die). Without it, the run happens and
+      *then* the normal keep-alive takes over — "run it, but leave me a shell to
+      poke at the wreckage".
+
+    ``post_clone`` is a repo-provided setup script (path relative to
+    ``work_dir``, or absolute) run after the checkout and before anything else —
+    the hook this launcher previously lacked, for things like linking a venv or
+    an artifacts mount into the tree.
+    """
     lines = [
         f'mkdir -p "{base_dir}" ~/.claude',
         # Credentials: raw JSON blob from the macOS Keychain. On Linux without a
@@ -139,26 +171,55 @@ def build_startup(base_dir: str, work_dir: str, code_server: bool, marimo: bool,
         # Runs at startup (not image build) so the clone lands on the mounted
         # persistent volume and survives restarts. Only clones once — on a
         # persistent volume, later launches just resume the existing checkout.
+        #
+        # init + fetch-by-ref rather than `clone --branch`: `--branch` only
+        # accepts a branch or tag name, so a pinned commit SHA (what a
+        # reproducible batch run wants) can't be cloned that way. A shallow
+        # `fetch origin <ref>` accepts branches, tags *and* SHAs against GitHub,
+        # which serves both the interactive and the pinned-run cases.
         lines += [
             "git config --global advice.detachedHead false",
             f'if [ ! -d "{clone_dir}/.git" ]; then',
+            f'  CC_REF={_shq(ref)}',
             '  if [ -n "$GH_TOKEN" ]; then',
-            f'    GIT_ASKPASS=echo git clone --quiet --depth 1 --branch {ref} '
-            f'"https://oauth2:${{GH_TOKEN}}@github.com/{repo}.git" "{clone_dir}"',
+            f'    CC_URL="https://oauth2:${{GH_TOKEN}}@github.com/{repo}.git"',
             '  else',
-            f'    GIT_TERMINAL_PROMPT=0 git clone --quiet --depth 1 --branch {ref} '
-            f'"https://github.com/{repo}.git" "{clone_dir}"',
+            f'    CC_URL="https://github.com/{repo}.git"',
             '  fi',
-            # $? here is the exit status of whichever clone command the
-            # if/else above just ran — don't claim success unconditionally.
-            '  if [ $? -eq 0 ]; then',
-            f'    echo "[repo] cloned {repo}@{ref} -> {clone_dir}"',
+            f'  mkdir -p "{clone_dir}"',
+            f'  if GIT_ASKPASS=echo GIT_TERMINAL_PROMPT=0 sh -c \''
+            f'git init -q "$1" && git -C "$1" remote add origin "$2" && '
+            f'git -C "$1" fetch -q --depth 1 origin "$3"\' _ "{clone_dir}" "$CC_URL" "$CC_REF"; then',
+            # A 40-hex ref is a commit: check it out detached. Anything else is a
+            # branch/tag name, so materialise a local branch of that name — an
+            # interactive sandbox expects to be *on* the branch it asked for.
+            "    if printf '%s' \"$CC_REF\" | grep -qE '^[0-9a-f]{7,40}$'; then",
+            f'      git -C "{clone_dir}" checkout -q --detach FETCH_HEAD',
+            '    else',
+            f'      git -C "{clone_dir}" checkout -q -B "$CC_REF" FETCH_HEAD',
+            '    fi',
+            f'    echo "[repo] cloned {repo}@$CC_REF -> {clone_dir} ('
+            f'$(git -C "{clone_dir}" rev-parse --short HEAD))"',
             '  else',
-            f'    echo "[repo] ERROR: git clone of {repo}@{ref} failed — check the ref '
+            f'    echo "[repo] ERROR: fetch of {repo}@$CC_REF failed — check the ref '
             f'exists and GH_TOKEN has access" >&2',
             '  fi',
             'else',
             f'  echo "[repo] {clone_dir} already present (persistent volume) — resuming as-is"',
+            'fi',
+        ]
+
+    if post_clone:
+        # Relative paths resolve inside the checkout, so a repo can ship its own
+        # setup script and name it as `--post-clone scripts/setup.sh`.
+        path = post_clone if post_clone.startswith("/") else f"{work_dir}/{post_clone}"
+        lines += [
+            f'if [ -f {_shq(path)} ]; then',
+            f'  echo "[post-clone] running {post_clone}"',
+            f'  ( cd {_shq(work_dir)} && bash {_shq(path)} ) '
+            f'|| echo "[post-clone] WARNING: {post_clone} exited non-zero" >&2',
+            'else',
+            f'  echo "[post-clone] WARNING: {post_clone} not found — skipping" >&2',
             'fi',
         ]
 
@@ -227,15 +288,42 @@ def build_startup(base_dir: str, work_dir: str, code_server: bool, marimo: bool,
             f"--port {PORT_MARIMO} --no-token > /tmp/marimo.log 2>&1 ) &"
         )
 
+    if run_cmd:
+        # The command is written to a file via a quoted heredoc rather than
+        # interpolated into a command line: the delimiter being quoted means
+        # bash copies the body through verbatim (no expansion at *write* time,
+        # while the script still expands normally when it runs), so arbitrary
+        # quoting in run_cmd can't break out into the startup script.
+        lines += [
+            f"cat > {BATCH_SCRIPT} <<'CCM_BATCH_EOF'",
+            run_cmd,
+            "CCM_BATCH_EOF",
+            "set -o pipefail",
+            f'echo "[batch] running in {work_dir}"',
+            f'( cd {_shq(work_dir)} && bash {BATCH_SCRIPT} ) 2>&1 '
+            f'| tee {_shq(base_dir + "/.last_run.log")}',
+            "CCM_RC=${PIPESTATUS[0]}",
+            'echo "[batch] exit=$CCM_RC"',
+        ]
+        if exit_on_finish:
+            # Ends the only foreground process, so Modal tears the sandbox down
+            # and stops billing. The exit status becomes the sandbox's.
+            lines.append('exit "$CCM_RC"')
+        else:
+            lines.append('echo "[batch] --exit-on-finish not set — '
+                         'holding the sandbox open for inspection"')
+
     # Exactly one process stays in the foreground to keep the sandbox alive.
     # sshd is the default (more stable than the ttyd terminal or `modal shell`
     # for long-running work) — ttyd still runs in the background for the
     # browser terminal. With --no-ssh, ttyd takes over the foreground instead.
-    if ssh:
-        lines.append(f"ttyd -W -p {PORT_TERMINAL} bash > /tmp/ttyd.log 2>&1 &")
-        lines.append(f"exec /usr/sbin/sshd -D -e -p {PORT_SSH}")
-    else:
-        lines.append(f"exec ttyd -W -p {PORT_TERMINAL} bash")
+    # A batch run that exits on finish deliberately has no keep-alive at all.
+    if not (run_cmd and exit_on_finish):
+        if ssh:
+            lines.append(f"ttyd -W -p {PORT_TERMINAL} bash > /tmp/ttyd.log 2>&1 &")
+            lines.append(f"exec /usr/sbin/sshd -D -e -p {PORT_SSH}")
+        else:
+            lines.append(f"exec ttyd -W -p {PORT_TERMINAL} bash")
     return "\n".join(lines)
 
 
@@ -293,8 +381,22 @@ def main(
     persist: bool = True,
     volume_name: str | None = None,
     hf_cache_volume: str = "claude-code-hf-cache",
-):
+    run_cmd: str | None = None,
+    exit_on_finish: bool = False,
+    post_clone: str | None = None,
+    extra_volumes: dict[str, str] | None = None,
+    detach: bool = False,
+) -> int:
+    """Launch a sandbox. Returns the batch command's exit status when this is a
+    run-then-die launch that we waited on, else 0."""
     app = modal.App.lookup("claude-code-server", create_if_missing=True)
+
+    # A run-then-die sandbox outlives nothing, so the interactive services are
+    # pure overhead — and their tunnels don't exist to print. Use --run without
+    # --exit-on-finish when you want the run *and* a shell afterwards.
+    batch_exit = bool(run_cmd) and exit_on_finish
+    if batch_exit:
+        code_server = marimo = ssh = False
 
     # A registry secret only makes sense for a real registry pull.
     secret_name = registry_secret if image_base != "slim" else None
@@ -356,10 +458,21 @@ def main(
     else:
         print("Persistent storage: disabled (--no-persist) — sandbox filesystem is ephemeral.")
 
-    startup = build_startup(BASE_DIR, work_dir, code_server, marimo, ssh,
-                            settings_repo, settings_branch, repo, ref, clone_dir)
+    # Caller-supplied mounts, e.g. a project's shared artifacts volume. Kept
+    # deliberately opaque — this launcher doesn't need to know what they hold.
+    # Applied after the standard set so an explicit --mount wins on a collision.
+    for mount_path, vol_name in (extra_volumes or {}).items():
+        volumes[mount_path] = modal.Volume.from_name(vol_name, create_if_missing=True)
+        print(f"Extra volume: {vol_name} -> {mount_path}")
 
-    ports = [PORT_TERMINAL]
+    startup = build_startup(BASE_DIR, work_dir, code_server, marimo, ssh,
+                            settings_repo, settings_branch, repo, ref, clone_dir,
+                            post_clone=post_clone, run_cmd=run_cmd,
+                            exit_on_finish=exit_on_finish)
+
+    # ttyd only runs as part of the keep-alive, which a run-then-die job has
+    # none of — asking Modal to tunnel a port nothing listens on is waste.
+    ports = [] if batch_exit else [PORT_TERMINAL]
     if code_server:
         ports.append(PORT_CODE)
     if marimo:
@@ -370,7 +483,8 @@ def main(
         f"mem={memory or 'default'}MiB storage={'ccm-' + slug if persist else 'ephemeral'} "
         f"ssh={'on' if ssh else 'off'}"
     )
-    print(f"Launching Claude Code on Modal (timeout: {hours}h, {resource_summary})...")
+    what = "batch job" if batch_exit else "Claude Code"
+    print(f"Launching {what} on Modal (timeout: {hours}h, {resource_summary})...")
     sandbox_kwargs = dict(
         encrypted_ports=ports,
         secrets=secrets,
@@ -390,6 +504,22 @@ def main(
     with modal.enable_output():
         sandbox = modal.Sandbox.create("bash", "-c", startup, **sandbox_kwargs)
 
+    if batch_exit:
+        # No services, so no tunnels to print — the sandbox is a job, not a box.
+        print(f"\n  Sandbox      : {sandbox.object_id}")
+        print(f"  Logs         : modal container logs {sandbox.object_id}")
+        if detach:
+            print("  Detached     — not waiting; poll the command above for progress.")
+            return 0
+        print("  Waiting for the run to finish (Ctrl-C detaches; the job keeps going)...")
+        sandbox.wait()
+        rc = sandbox.returncode
+        print(f"  Exit status  : {rc}")
+        if persist:
+            print(f"  Artifacts    : on the mounted volumes (ccm-{slug}, "
+                  f"{', '.join(extra_volumes or {}) or 'no extra mounts'})")
+        return rc if isinstance(rc, int) else 0
+
     tunnels = sandbox.tunnels()
     print(f"\n  Web terminal : {tunnels[PORT_TERMINAL].url}")
     print(f"               (bash shell, type `claude` — already authenticated)")
@@ -407,6 +537,7 @@ def main(
               f"(relaunch with --volume-name {slug} to resume)")
     else:
         print(f"  Persistent   : none (ephemeral — drop --no-persist to keep work across runs)")
+    return 0
 
 
 if __name__ == "__main__":
@@ -454,6 +585,26 @@ if __name__ == "__main__":
                              "~/.claude, ~/.local). Default: derived from --repo, else 'default'. "
                              "Give concurrently-running sandboxes distinct names — two sandboxes "
                              "sharing a volume-name will race on writes.")
+    parser.add_argument("--run", default=None, metavar="CMD",
+                        help="Run CMD in the checkout instead of just parking on a shell. "
+                             "Output is teed to <workspace>/.last_run.log. Combine with "
+                             "--exit-on-finish for a run-then-die batch job; without it the "
+                             "command runs and the sandbox then stays up for inspection.")
+    parser.add_argument("--exit-on-finish", action="store_true",
+                        help="With --run: tear the sandbox down as soon as the command exits, "
+                             "and exit with its status. Disables VS Code / Marimo / SSH, which "
+                             "a job that outlives nothing has no use for.")
+    parser.add_argument("--detach", action="store_true",
+                        help="With --run --exit-on-finish: don't block waiting for the job")
+    parser.add_argument("--post-clone", default=None, metavar="PATH",
+                        help="Script run after the checkout, before anything else. Relative "
+                             "paths resolve inside the checkout (e.g. scripts/setup.sh). "
+                             "Failures warn but don't abort startup.")
+    parser.add_argument("--mount", action="append", default=None, metavar="NAME:/path",
+                        dest="mounts",
+                        help="Mount an additional Modal Volume NAME at /path (repeatable). "
+                             "Created if missing. Use a path outside the workspace volume — "
+                             "volumes are not mounted inside one another.")
     parser.add_argument("--hf-cache-volume", default="claude-code-hf-cache",
                         help="Modal Volume name for the shared HuggingFace weights cache "
                              "(default: claude-code-hf-cache; shared across all sandboxes since "
@@ -466,13 +617,28 @@ if __name__ == "__main__":
         extra = []
     else:
         extra = [s for s in args.secrets if s]
-    main(args.repo, args.ref, args.hours, args.github_token,
-         gpu=args.gpu, cpu=args.cpu, memory=args.memory,
-         image_base=args.image, registry_secret=args.registry_secret,
-         extra_secrets=extra,
-         code_server=args.code_server, marimo=args.marimo,
-         settings_repo=args.claude_settings_repo or None,
-         settings_branch=args.claude_settings_branch,
-         ssh=args.ssh, ssh_public_key=args.ssh_public_key, ssh_password=args.ssh_password,
-         persist=args.persist, volume_name=args.volume_name,
-         hf_cache_volume=args.hf_cache_volume)
+    extra_volumes = {}
+    for spec in (args.mounts or []):
+        # NAME:/path — rsplit so a volume name containing ':' still works.
+        name, _, path = spec.rpartition(":")
+        if not name or not path.startswith("/"):
+            parser.error(f"--mount expects NAME:/absolute/path, got {spec!r}")
+        extra_volumes[path] = name
+
+    if args.exit_on_finish and not args.run:
+        parser.error("--exit-on-finish only makes sense with --run")
+
+    sys.exit(main(args.repo, args.ref, args.hours, args.github_token,
+                  gpu=args.gpu, cpu=args.cpu, memory=args.memory,
+                  image_base=args.image, registry_secret=args.registry_secret,
+                  extra_secrets=extra,
+                  code_server=args.code_server, marimo=args.marimo,
+                  settings_repo=args.claude_settings_repo or None,
+                  settings_branch=args.claude_settings_branch,
+                  ssh=args.ssh, ssh_public_key=args.ssh_public_key,
+                  ssh_password=args.ssh_password,
+                  persist=args.persist, volume_name=args.volume_name,
+                  hf_cache_volume=args.hf_cache_volume,
+                  run_cmd=args.run, exit_on_finish=args.exit_on_finish,
+                  post_clone=args.post_clone, extra_volumes=extra_volumes,
+                  detach=args.detach))

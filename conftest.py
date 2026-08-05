@@ -34,6 +34,8 @@ def _install_fake_modal() -> types.ModuleType:
     modal.DICT_SECRETS = []         # list of dicts turned into secrets
     modal.LAST_SANDBOX_ARGS = None  # positional args to Sandbox.create
     modal.LAST_SANDBOX_KWARGS = None
+    modal.LAST_SANDBOX = None       # the _Sandbox object Sandbox.create returned
+    modal.NEXT_RETURNCODE = 0       # what a batch sandbox's wait() should report
 
     def _reset():
         modal.CREATED_VOLUMES.clear()
@@ -41,6 +43,8 @@ def _install_fake_modal() -> types.ModuleType:
         modal.DICT_SECRETS.clear()
         modal.LAST_SANDBOX_ARGS = None
         modal.LAST_SANDBOX_KWARGS = None
+        modal.LAST_SANDBOX = None
+        modal.NEXT_RETURNCODE = 0
 
     modal.reset = _reset
 
@@ -114,16 +118,25 @@ def _install_fake_modal() -> types.ModuleType:
         def __init__(self, args, kwargs):
             self._ports = list(kwargs.get("encrypted_ports", [])) + \
                 list(kwargs.get("unencrypted_ports", []))
+            # Batch launches call wait()/returncode. Tests can steer the result
+            # via modal.NEXT_RETURNCODE to exercise the failure path.
+            self.returncode = None
+            self.waited = False
 
         def tunnels(self):
             return {p: _Tunnel(p) for p in self._ports}
+
+        def wait(self, *a, **k):
+            self.waited = True
+            self.returncode = modal.NEXT_RETURNCODE
 
     class Sandbox:
         @staticmethod
         def create(*args, **kwargs):
             modal.LAST_SANDBOX_ARGS = args
             modal.LAST_SANDBOX_KWARGS = kwargs
-            return _Sandbox(args, kwargs)
+            modal.LAST_SANDBOX = _Sandbox(args, kwargs)
+            return modal.LAST_SANDBOX
 
     def enable_output():
         return contextlib.nullcontext()

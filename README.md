@@ -147,6 +147,43 @@ python claude_code_modal.py --repo owner/repo --gpu A100-80GB
 python claude_code_modal.py --image slim --no-marimo      # fast CPU box, VS Code only
 ```
 
+### Batch jobs (run-then-die)
+
+A dev box you leave running bills for the GPU whether or not it's computing.
+When the unit of work is a *job* rather than a session, `--run` executes a
+command in the checkout instead of parking on a shell, and `--exit-on-finish`
+tears the sandbox down the moment it's done — commission, run, die:
+
+```bash
+python claude_code_modal.py \
+  --repo owner/repo --ref 1a2b3c4 --gpu L40S \
+  --run 'python train.py --config configs/big.yaml' \
+  --exit-on-finish
+```
+
+The launcher blocks until the job ends and exits with the command's status, so
+it composes with shell `&&` and CI. Notes:
+
+- `--exit-on-finish` turns off VS Code, Marimo and SSH — a sandbox that dies
+  with the job has no use for them, and there'd be no tunnels to print. Pass
+  `--run` *without* it to run the command and then keep the box up for
+  inspection, services and all.
+- `--detach` returns as soon as the job is launched instead of waiting.
+- Output is teed to `<workspace>/.last_run.log`; `modal container logs <id>`
+  works too.
+- `--ref` accepts a **commit SHA** as well as a branch or tag, which is what a
+  reproducible run wants.
+- `--post-clone scripts/setup.sh` runs a repo-provided script after the
+  checkout and before the command — for linking a venv, wiring up a mount, or
+  any other project-specific preparation.
+- `--mount NAME:/path` mounts an extra Modal Volume, e.g. a results volume
+  shared by every job. Use a path *outside* `/root/workspace` — volumes are not
+  mounted inside one another.
+
+Parallel jobs must not share a workspace volume (concurrent writers race).
+Give each `--volume-name` of its own, or `--no-persist` and keep only the
+shared results mount.
+
 ### Persistent storage on Modal
 
 Presets launched through `launch.py` are **persistent by default** — the same

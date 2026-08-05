@@ -1,0 +1,72 @@
+[
+  {
+    "name": "cpu-small",
+    "image": "slim",
+    "gpu": null,
+    "cpu": 2,
+    "memory": 8192,
+    "hours": 4,
+    "repo": null,
+    "ref": "main",
+    "code_server": true,
+    "marimo": true,
+    "persist": false,
+    "count": 0
+  },
+  {
+    "name": "cpu-large",
+    "image": "ghcr.io/thate10/dev-container:latest",
+    "gpu": null,
+    "cpu": 8,
+    "memory": 32768,
+    "hours": 8,
+    "repo": null,
+    "ref": "main",
+    "code_server": true,
+    "marimo": true,
+    "persist": false,
+    "count": 0
+  },
+  {
+    "name": "gpu-small",
+    "image": "ghcr.io/thate10/dev-container:latest",
+    "gpu": "L4",
+    "cpu": 4,
+    "memory": 16384,
+    "hours": 4,
+    "repo": null,
+    "ref": "main",
+    "code_server": true,
+    "marimo": true,
+    "persist": false,
+    "count": 0
+  },
+  {
+    "name": "gpu-l40s",
+    "image": "ghcr.io/thate10/dev-container:latest",
+    "gpu": "L40S",
+    "cpu": 8,
+    "memory": 32768,
+    "hours": 8,
+    "repo": null,
+    "ref": "main",
+    "code_server": true,
+    "marimo": true,
+    "persist": false,
+    "count": 0
+  },
+  {
+    "name": "gpu-h100",
+    "image": "ghcr.io/thate10/dev-container:latest",
+    "gpu": "H100",
+    "cpu": 16,
+    "memory": 65536,
+    "hours": 6,
+    "repo": null,
+    "ref": "main",
+    "code_server": true,
+    "marimo": true,
+    "persist": false,
+    "count": 0
+  }
+]
