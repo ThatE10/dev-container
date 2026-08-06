@@ -40,23 +40,47 @@ python launch.py            # menu — pick a saved preset or create one
 python launch.py --list     # print presets, most-used first
 python launch.py --volumes  # print storage volumes and which presets use them
 python launch.py --forget N # delete preset #N
+python launch.py --presets path/to/catalog.json   # merge in a project catalog
 ```
 
-Presets are stored at `~/.config/claude-code-modal/presets.json` and sorted by
-usage count, so your most-used config is always at the top of the menu. Each
-preset stores: name, base image, GPU, CPU, RAM, repo, ref, session hours,
-whether to attach a fresh `gh auth token` on launch, and its persistent-storage
-volume name.
+Your own presets are stored at `~/.config/claude-code-modal/presets.json` and
+sorted by usage count, so your most-used config is always at the top of the
+menu. Each preset stores: name, base image, GPU, CPU, RAM, repo, ref, session
+hours, whether to attach a fresh `gh auth token` on launch, and its
+persistent-storage volume name.
 
 Tokens are never written to the preset file — the `gh auth token` value is
 resolved at launch time.
 
+### Preset catalogs
+
+Presets are merged from three places, each overriding the last by preset name:
+
+| Source   | Where                                              |
+| -------- | -------------------------------------------------- |
+| built-in | `presets.default.json` next to `launch.py`         |
+| project  | `--presets PATH` (repeatable) or `$DEVCONTAINER_PRESETS` (`:`-separated) |
+| user     | `~/.config/claude-code-modal/presets.json`         |
+
+The built-ins (`cpu-small`, `gpu-l40s`, `gpu-h100`, …) give a fresh machine
+something to launch before anyone has defined a preset. A project catalog lets
+a repo version the hardware profiles its work actually needs, so they travel
+with the code and everyone — including an agent working in the repo — sees the
+same set. Your own file always wins.
+
+`--list` tags each entry with the catalog it came from. Launching a catalog
+preset **adopts** it: a copy lands in your `presets.json`, which is where its
+usage count lives and where you can retune it. Until then the catalog stays the
+single source of truth, so `launch.py` never silently forks a shared preset.
+
 ### Persistent storage
 
 Presets are persistent by default. Each is backed by a named set of Modal
-Volumes — `<volume>-workspace`, `<volume>-local`, `<volume>-claude`, and
-`<volume>-hf` — mounted at `/root/workspace`, `/root/.local`, `/root/.claude`,
-and the HuggingFace cache respectively. The volume name defaults to the preset
+Volumes — `ccm-<volume>-workspace`, `ccm-<volume>-local` and
+`ccm-<volume>-claude` — mounted at `/root/workspace`, `/root/.local` and
+`/root/.claude`, plus the HuggingFace cache volume (`claude-code-hf-cache` by
+default), which is *shared* across sandboxes rather than per-preset since it's
+read-mostly after the first download. The volume name defaults to the preset
 name, but presets and volumes are decoupled: creating a preset opens a volume
 picker listing the volumes your other presets use — pick one to share storage
 between presets, type a new name, or choose the ephemeral option for a

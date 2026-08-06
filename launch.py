@@ -16,13 +16,22 @@ set of storage volumes), and appending 'v' to a menu choice (e.g. '1v')
 relaunches that preset on a different volume — one-off, or saved back to the
 preset if you say so.
 
+Presets come from three catalogs, each overriding the last by name: the
+built-in presets.default.json shipped here, any project catalog named by
+--presets / $DEVCONTAINER_PRESETS (so a repo can version the hardware profiles
+its work needs), and your own presets.json, which always wins. Launching a
+catalog preset adopts a local copy; until then the catalog stays its source of
+truth and is never written back to.
+
   python launch.py            # menu (also offers [new preset] / [remove a preset])
   python launch.py --list     # print presets, exit
   python launch.py --volumes  # print storage volumes and which presets use them
   python launch.py --forget N # delete preset #N
+  python launch.py --presets P  # merge in an extra preset catalog
 """
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -31,6 +40,11 @@ from pathlib import Path
 CONFIG_DIR = Path.home() / ".config" / "claude-code-modal"
 PRESETS_FILE = CONFIG_DIR / "presets.json"
 SCRIPT = Path(__file__).resolve().parent / "claude_code_modal.py"
+# Generic starting-point presets shipped with the launcher, so a fresh machine
+# has something to launch before anyone has defined a preset of their own.
+BUILTIN_PRESETS_FILE = Path(__file__).resolve().parent / "presets.default.json"
+# Which catalog a preset came from. Internal — stripped before persisting.
+SOURCE_KEY = "_source"
 
 DEFAULT_IMAGE = "ghcr.io/thate10/dev-container:latest"
 IMAGE_CHOICES = [
@@ -121,15 +135,65 @@ def ensure_ssh_key(ssh_dir: Path | None = None) -> bool:
     return True
 
 
-def load_presets() -> list[dict]:
-    if not PRESETS_FILE.exists():
+def read_catalog(path: Path, source: str) -> list[dict]:
+    """Read one preset catalog. A missing file is normal (no catalog is
+    required); a malformed one warns and is skipped rather than taking the
+    launcher down over a stray comma in a shared file."""
+    if not path.exists():
         return []
-    return json.loads(PRESETS_FILE.read_text())
+    try:
+        entries = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"  warning: ignoring preset catalog {path} ({e})", file=sys.stderr)
+        return []
+    if not isinstance(entries, list):
+        print(f"  warning: ignoring preset catalog {path} (expected a JSON list)",
+              file=sys.stderr)
+        return []
+    out = []
+    for p in entries:
+        if isinstance(p, dict) and p.get("name"):
+            out.append({**p, SOURCE_KEY: source})
+    return out
+
+
+def catalog_paths(extra_paths: list[str] | None = None) -> list[tuple[Path, str]]:
+    """Catalogs in increasing order of precedence.
+
+    Built-ins ship with the launcher; project catalogs come from $DEVCONTAINER_PRESETS
+    (os.pathsep-separated) or --presets, so a repo can version the hardware profiles
+    its work actually needs; the user's own file always wins.
+    """
+    paths = [(BUILTIN_PRESETS_FILE, "builtin")]
+    env = os.environ.get("DEVCONTAINER_PRESETS", "")
+    for raw in env.split(os.pathsep) + list(extra_paths or []):
+        if raw.strip():
+            paths.append((Path(raw.strip()).expanduser(), "project"))
+    paths.append((PRESETS_FILE, "user"))
+    return paths
+
+
+def load_presets(extra_paths: list[str] | None = None) -> list[dict]:
+    """Merge every catalog by preset name; later sources override earlier ones."""
+    merged: dict[str, dict] = {}
+    for path, source in catalog_paths(extra_paths):
+        for p in read_catalog(path, source):
+            merged[p["name"]] = p
+    return list(merged.values())
 
 
 def save_presets(presets: list[dict]) -> None:
+    """Persist only the user's own presets.
+
+    Catalog presets are owned by the file they came from — writing them back
+    would fork a private copy that silently stops tracking the shared catalog.
+    Launching one *adopts* it (see menu()), which is the deliberate way to get a
+    local copy you can edit.
+    """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    PRESETS_FILE.write_text(json.dumps(presets, indent=2))
+    own = [{k: v for k, v in p.items() if k != SOURCE_KEY}
+           for p in presets if p.get(SOURCE_KEY, "user") == "user"]
+    PRESETS_FILE.write_text(json.dumps(own, indent=2))
 
 
 def prompt(label: str, default: str | None = None) -> str | None:
@@ -282,6 +346,12 @@ def create_preset(presets: list[dict]) -> dict:
     settings_repo = prompt("global ~/.claude settings repo (blank = none)",
                            "ThatE10/claude-code-settings") or None
     use_gh_token = yesno("use `gh auth token` (private repo)?", False) if repo else False
+    with_launcher = yesno(
+        "clone this launcher into the sandbox, so an agent inside can launch "
+        "its own containers/jobs? (adds Modal credentials)", False)
+    extra_raw = prompt("other repos to clone alongside (owner/repo[@ref], "
+                       "comma-separated, blank = none)", "")
+    extra_repos = [s.strip() for s in (extra_raw or "").split(",") if s.strip()]
     secrets_raw = prompt("extra Modal secrets (comma-separated, blank = none)",
                          ",".join(DEFAULT_EXTRA_SECRETS))
     extra_secrets = [s.strip() for s in (secrets_raw or "").split(",") if s.strip()]
@@ -302,6 +372,8 @@ def create_preset(presets: list[dict]) -> dict:
         "settings_repo": settings_repo,
         "use_gh_token": use_gh_token,
         "extra_secrets": extra_secrets,
+        "with_launcher": with_launcher,
+        "extra_repos": extra_repos,
         "persist": persist,
         "volume": volume,
         "count": 0,
@@ -319,8 +391,18 @@ def summarize(p: dict) -> str:
     vol = preset_volume(p)
     store = f" · vol:{vol}" if vol else " · ephemeral"
     used = p.get("count", 0)
+    src = p.get(SOURCE_KEY, "user")
+    origin = "" if src == "user" else f" [{src}]"
+    # Worth surfacing: these presets can spawn further sandboxes, which is both
+    # a capability and a cost.
+    extras = []
+    if p.get("with_launcher"):
+        extras.append("+launcher")
+    if p.get("extra_repos"):
+        extras.append(f"+{len(p['extra_repos'])} repo(s)")
+    extra_s = " " + " ".join(extras) if extras else ""
     return (f"{p['name']:<22} [{img_short}] {gpu:<12} {p['cpu']}c {p['memory']}Mi · "
-            f"{p['hours']}h {svc_s}{store}{repo}  (used {used}×)")
+            f"{p['hours']}h {svc_s}{store}{repo}{extra_s}  (used {used}×){origin}")
 
 
 def build_cmd(preset: dict) -> list[str]:
@@ -346,6 +428,18 @@ def build_cmd(preset: dict) -> list[str]:
     # Global ~/.claude settings repo — empty string disables the sync downstream.
     settings_repo = preset.get("settings_repo", "ThatE10/claude-code-settings")
     cmd += ["--claude-settings-repo", settings_repo or ""]
+    # Self-clone: put this launcher in the sandbox so an agent inside can
+    # commission its own containers. Downstream this also attaches the Modal
+    # credentials secret and sets $DEV_CONTAINER_DIR.
+    if preset.get("with_launcher"):
+        cmd += ["--with-launcher"]
+        if preset.get("launcher_ref"):
+            cmd += ["--launcher-ref", preset["launcher_ref"]]
+        # A preset may opt out of the credential secret by storing "".
+        if "modal_secret" in preset:
+            cmd += ["--modal-secret", preset["modal_secret"] or ""]
+    for spec in preset.get("extra_repos", []):
+        cmd += ["--extra-repo", spec]
     # Persistent storage — each preset maps to its own Modal Volume set, keyed by
     # the preset's volume name, so relaunching a preset resumes its workspace /
     # ~/.claude / ~/.local and two different presets never race on one volume.
@@ -486,6 +580,10 @@ def menu(presets: list[dict]) -> None:
             print("invalid choice.")
             sys.exit(1)
 
+        # Launching a shared catalog preset adopts a local copy: it's now yours
+        # to retune, and its usage count has somewhere to live. Until then the
+        # catalog stays the single source of truth for it.
+        preset[SOURCE_KEY] = "user"
         preset["count"] = preset.get("count", 0) + 1
         save_presets(presets)
         run = dict(preset)
@@ -501,9 +599,13 @@ def main() -> None:
     parser.add_argument("--volumes", action="store_true",
                         help="Print storage volumes and which presets use them, then exit")
     parser.add_argument("--forget", type=int, metavar="N", help="Delete preset #N")
+    parser.add_argument("--presets", action="append", default=None, metavar="PATH",
+                        help="Extra preset catalog to merge in, e.g. a catalog versioned "
+                             "in a project repo (repeatable). Also read from "
+                             "$DEVCONTAINER_PRESETS. Your own presets.json always wins.")
     args = parser.parse_args()
 
-    presets = load_presets()
+    presets = load_presets(args.presets)
     if args.list:
         cmd_list(presets)
     elif args.volumes:

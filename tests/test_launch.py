@@ -2,6 +2,8 @@
 
 launch.py imports only the stdlib, so these run without any stubbing.
 """
+import json
+import os
 from pathlib import Path
 
 import pytest
@@ -374,3 +376,105 @@ class TestEnsureSSHKey:
 
         monkeypatch.setattr(launch.subprocess, "run", boom)
         assert launch.ensure_ssh_key(tmp_path) is False
+
+
+class TestPresetCatalogs:
+    """load_presets merges built-in, project and user catalogs by name."""
+
+    def _write(self, path, entries):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(entries))
+        return path
+
+    def _p(self, name, **over):
+        return {"name": name, "gpu": None, "cpu": 2, "memory": 8192,
+                "hours": 4, "repo": None, **over}
+
+    @pytest.fixture
+    def isolated(self, tmp_path, monkeypatch):
+        """Point every catalog at tmp_path so the developer's real
+        ~/.config/claude-code-modal/presets.json can't leak into a test."""
+        monkeypatch.setattr(launch, "BUILTIN_PRESETS_FILE", tmp_path / "builtin.json")
+        monkeypatch.setattr(launch, "PRESETS_FILE", tmp_path / "user.json")
+        monkeypatch.setattr(launch, "CONFIG_DIR", tmp_path)
+        monkeypatch.delenv("DEVCONTAINER_PRESETS", raising=False)
+        return tmp_path
+
+    def test_missing_catalogs_are_not_an_error(self, isolated):
+        assert launch.load_presets() == []
+
+    def test_builtin_presets_are_available_with_no_user_file(self, isolated):
+        self._write(isolated / "builtin.json", [self._p("gpu-l40s", gpu="L40S")])
+        got = launch.load_presets()
+        assert [p["name"] for p in got] == ["gpu-l40s"]
+        assert got[0][launch.SOURCE_KEY] == "builtin"
+
+    def test_user_preset_overrides_builtin_of_the_same_name(self, isolated):
+        self._write(isolated / "builtin.json", [self._p("gpu-l40s", hours=4)])
+        self._write(isolated / "user.json", [self._p("gpu-l40s", hours=99)])
+        got = launch.load_presets()
+        assert len(got) == 1
+        assert got[0]["hours"] == 99
+        assert got[0][launch.SOURCE_KEY] == "user"
+
+    def test_project_catalog_sits_between_builtin_and_user(self, isolated):
+        self._write(isolated / "builtin.json", [self._p("x", hours=1)])
+        proj = self._write(isolated / "proj.json", [self._p("x", hours=2)])
+        got = launch.load_presets([str(proj)])
+        assert got[0]["hours"] == 2 and got[0][launch.SOURCE_KEY] == "project"
+        self._write(isolated / "user.json", [self._p("x", hours=3)])
+        assert launch.load_presets([str(proj)])[0]["hours"] == 3
+
+    def test_project_catalog_from_env_var(self, isolated, monkeypatch):
+        proj = self._write(isolated / "proj.json", [self._p("from-env")])
+        monkeypatch.setenv("DEVCONTAINER_PRESETS", str(proj))
+        assert [p["name"] for p in launch.load_presets()] == ["from-env"]
+
+    def test_multiple_env_catalogs_are_pathsep_separated(self, isolated, monkeypatch):
+        a = self._write(isolated / "a.json", [self._p("a")])
+        b = self._write(isolated / "b.json", [self._p("b")])
+        monkeypatch.setenv("DEVCONTAINER_PRESETS", f"{a}{os.pathsep}{b}")
+        assert {p["name"] for p in launch.load_presets()} == {"a", "b"}
+
+    def test_malformed_catalog_warns_and_is_skipped(self, isolated, capsys):
+        (isolated / "builtin.json").write_text("{not json")
+        self._write(isolated / "user.json", [self._p("ok")])
+        assert [p["name"] for p in launch.load_presets()] == ["ok"]
+        assert "warning" in capsys.readouterr().err
+
+    def test_entries_without_a_name_are_dropped(self, isolated):
+        self._write(isolated / "user.json", [{"gpu": "L40S"}, self._p("good")])
+        assert [p["name"] for p in launch.load_presets()] == ["good"]
+
+    def test_save_does_not_fork_catalog_presets_into_the_user_file(self, isolated):
+        """A shared catalog stays the source of truth until a preset is adopted."""
+        self._write(isolated / "builtin.json", [self._p("gpu-l40s")])
+        presets = launch.load_presets()
+        presets.append({**self._p("mine"), launch.SOURCE_KEY: "user"})
+        launch.save_presets(presets)
+        saved = json.loads((isolated / "user.json").read_text())
+        assert [p["name"] for p in saved] == ["mine"]
+
+    def test_saved_presets_carry_no_internal_source_key(self, isolated):
+        launch.save_presets([{**self._p("mine"), launch.SOURCE_KEY: "user"}])
+        saved = json.loads((isolated / "user.json").read_text())
+        assert launch.SOURCE_KEY not in saved[0]
+
+    def test_adopting_a_catalog_preset_persists_it(self, isolated):
+        """menu() flips _source to 'user' before saving — the adoption rule."""
+        self._write(isolated / "builtin.json", [self._p("gpu-l40s")])
+        presets = launch.load_presets()
+        presets[0][launch.SOURCE_KEY] = "user"
+        presets[0]["count"] = 1
+        launch.save_presets(presets)
+        assert [p["name"] for p in json.loads((isolated / "user.json").read_text())] \
+            == ["gpu-l40s"]
+
+    def test_shipped_builtin_catalog_is_valid_and_loadable(self):
+        """The real presets.default.json must parse and satisfy build_cmd."""
+        entries = json.loads(launch.BUILTIN_PRESETS_FILE.read_text())
+        assert entries, "shipped catalog should not be empty"
+        for p in entries:
+            for key in ("name", "gpu", "cpu", "memory", "hours", "repo"):
+                assert key in p, f"{p.get('name')} missing {key}"
+            launch.build_cmd(p)  # must not raise

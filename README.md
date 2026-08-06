@@ -147,6 +147,79 @@ python claude_code_modal.py --repo owner/repo --gpu A100-80GB
 python claude_code_modal.py --image slim --no-marimo      # fast CPU box, VS Code only
 ```
 
+### Batch jobs (run-then-die)
+
+A dev box you leave running bills for the GPU whether or not it's computing.
+When the unit of work is a *job* rather than a session, `--run` executes a
+command in the checkout instead of parking on a shell, and `--exit-on-finish`
+tears the sandbox down the moment it's done — commission, run, die:
+
+```bash
+python claude_code_modal.py \
+  --repo owner/repo --ref 1a2b3c4 --gpu L40S \
+  --run 'python train.py --config configs/big.yaml' \
+  --exit-on-finish
+```
+
+The launcher blocks until the job ends and exits with the command's status, so
+it composes with shell `&&` and CI. Notes:
+
+- `--exit-on-finish` turns off VS Code, Marimo and SSH — a sandbox that dies
+  with the job has no use for them, and there'd be no tunnels to print. Pass
+  `--run` *without* it to run the command and then keep the box up for
+  inspection, services and all.
+- `--detach` returns as soon as the job is launched instead of waiting.
+- Output is teed to `<workspace>/.last_run.log`; `modal container logs <id>`
+  works too.
+- `--ref` accepts a **commit SHA** as well as a branch or tag, which is what a
+  reproducible run wants.
+- `--post-clone scripts/setup.sh` runs a repo-provided script after the
+  checkout and before the command — for linking a venv, wiring up a mount, or
+  any other project-specific preparation.
+- `--mount NAME:/path` mounts an extra Modal Volume, e.g. a results volume
+  shared by every job. Use a path *outside* `/root/workspace` — volumes are not
+  mounted inside one another.
+
+Parallel jobs must not share a workspace volume (concurrent writers race).
+Give each `--volume-name` of its own, or `--no-persist` and keep only the
+shared results mount.
+
+### Agents that launch their own containers
+
+An agent working inside a sandbox often needs to commission *more* sandboxes —
+to run a GPU job, fan a sweep out, or rebuild something on bigger hardware. It
+can't, unless it has this launcher's source and Modal credentials.
+`--with-launcher` gives it both:
+
+```bash
+python claude_code_modal.py --repo ThatE10/rspd --with-launcher
+```
+
+That clones `ThatE10/dev-container` to `<workspace>/dev-container`, attaches
+the Modal secret (`--modal-secret`, default `modal-secret`, holding
+`MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET`), and exports `$DEV_CONTAINER_DIR` —
+into the shell *and* `~/.bashrc`, since the consumer is usually a process
+started long after launch. `import-secrets.sh` turns those tokens into
+`~/.modal.toml`, so `modal` is authenticated with no further setup.
+
+The checkout lands *beside* the main one rather than inside it, which is what
+a sibling tool expects: RSPD's `modal_experiment.py` looks for the launcher at
+`<its repo>/../dev-container`, and the primary checkout is `<workspace>/code`,
+so the paths line up with nothing to configure.
+
+`--extra-repo owner/repo[@ref]` is the general form (repeatable) for any other
+side-by-side checkout. Both accept a pinned ref.
+
+Two things to know:
+
+- The Modal secret must exist (`modal secret create modal-secret
+  MODAL_TOKEN_ID=... MODAL_TOKEN_SECRET=...`) or sandbox creation fails with a
+  clear error. Pass `--modal-secret ''` to skip it if credentials arrive some
+  other way.
+- Credentials that let a sandbox create more sandboxes are worth scoping
+  deliberately — an agent with them can spend money on GPUs. Prefer a Modal
+  token with the access you actually want the agent to have.
+
 ### Persistent storage on Modal
 
 Presets launched through `launch.py` are **persistent by default** — the same
