@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Manual trigger. A push only fires its event once: if Actions is unavailable
+  # at that moment — a spending limit, a disabled repo, an incident — the run is
+  # never created, and restoring Actions does not retroactively create it. That
+  # leaves a PR with no checks and no way to ask for them short of pushing a
+  # junk commit. This is the escape hatch.
+  workflow_dispatch:
 
 jobs:
   # ── Job 0: Python unit tests (runs on every push/PR, no Docker/GPU) ───────
