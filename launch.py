@@ -346,6 +346,12 @@ def create_preset(presets: list[dict]) -> dict:
     settings_repo = prompt("global ~/.claude settings repo (blank = none)",
                            "ThatE10/claude-code-settings") or None
     use_gh_token = yesno("use `gh auth token` (private repo)?", False) if repo else False
+    with_launcher = yesno(
+        "clone this launcher into the sandbox, so an agent inside can launch "
+        "its own containers/jobs? (adds Modal credentials)", False)
+    extra_raw = prompt("other repos to clone alongside (owner/repo[@ref], "
+                       "comma-separated, blank = none)", "")
+    extra_repos = [s.strip() for s in (extra_raw or "").split(",") if s.strip()]
     secrets_raw = prompt("extra Modal secrets (comma-separated, blank = none)",
                          ",".join(DEFAULT_EXTRA_SECRETS))
     extra_secrets = [s.strip() for s in (secrets_raw or "").split(",") if s.strip()]
@@ -366,6 +372,8 @@ def create_preset(presets: list[dict]) -> dict:
         "settings_repo": settings_repo,
         "use_gh_token": use_gh_token,
         "extra_secrets": extra_secrets,
+        "with_launcher": with_launcher,
+        "extra_repos": extra_repos,
         "persist": persist,
         "volume": volume,
         "count": 0,
@@ -385,8 +393,16 @@ def summarize(p: dict) -> str:
     used = p.get("count", 0)
     src = p.get(SOURCE_KEY, "user")
     origin = "" if src == "user" else f" [{src}]"
+    # Worth surfacing: these presets can spawn further sandboxes, which is both
+    # a capability and a cost.
+    extras = []
+    if p.get("with_launcher"):
+        extras.append("+launcher")
+    if p.get("extra_repos"):
+        extras.append(f"+{len(p['extra_repos'])} repo(s)")
+    extra_s = " " + " ".join(extras) if extras else ""
     return (f"{p['name']:<22} [{img_short}] {gpu:<12} {p['cpu']}c {p['memory']}Mi · "
-            f"{p['hours']}h {svc_s}{store}{repo}  (used {used}×){origin}")
+            f"{p['hours']}h {svc_s}{store}{repo}{extra_s}  (used {used}×){origin}")
 
 
 def build_cmd(preset: dict) -> list[str]:
@@ -412,6 +428,18 @@ def build_cmd(preset: dict) -> list[str]:
     # Global ~/.claude settings repo — empty string disables the sync downstream.
     settings_repo = preset.get("settings_repo", "ThatE10/claude-code-settings")
     cmd += ["--claude-settings-repo", settings_repo or ""]
+    # Self-clone: put this launcher in the sandbox so an agent inside can
+    # commission its own containers. Downstream this also attaches the Modal
+    # credentials secret and sets $DEV_CONTAINER_DIR.
+    if preset.get("with_launcher"):
+        cmd += ["--with-launcher"]
+        if preset.get("launcher_ref"):
+            cmd += ["--launcher-ref", preset["launcher_ref"]]
+        # A preset may opt out of the credential secret by storing "".
+        if "modal_secret" in preset:
+            cmd += ["--modal-secret", preset["modal_secret"] or ""]
+    for spec in preset.get("extra_repos", []):
+        cmd += ["--extra-repo", spec]
     # Persistent storage — each preset maps to its own Modal Volume set, keyed by
     # the preset's volume name, so relaunching a preset resumes its workspace /
     # ~/.claude / ~/.local and two different presets never race on one volume.

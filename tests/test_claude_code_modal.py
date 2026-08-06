@@ -318,3 +318,120 @@ class TestMainBatch:
     def test_post_clone_reaches_the_startup_script(self):
         self._run(post_clone="docker/link_env.sh")
         assert "[post-clone] running docker/link_env.sh" in modal.LAST_SANDBOX_ARGS[-1]
+
+
+class TestSplitRepoRef:
+    def test_bare_repo_gets_the_default_ref(self):
+        assert ccm.split_repo_ref("owner/repo") == ("owner/repo", "main")
+
+    def test_explicit_ref(self):
+        assert ccm.split_repo_ref("owner/repo@dev") == ("owner/repo", "dev")
+
+    def test_sha_ref(self):
+        sha = "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b"
+        assert ccm.split_repo_ref(f"owner/repo@{sha}") == ("owner/repo", sha)
+
+    def test_default_ref_is_overridable(self):
+        assert ccm.split_repo_ref("owner/repo", "release") == ("owner/repo", "release")
+
+    def test_trailing_at_is_not_a_ref(self):
+        """`owner/repo@` would otherwise clone an empty ref."""
+        assert ccm.split_repo_ref("owner/repo@") == ("owner/repo@", "main")
+
+
+class TestExtraRepos:
+    """Side-by-side checkouts, and --with-launcher's self-clone."""
+
+    def _run(self, **over):
+        modal.reset()
+        kw = dict(repo="ThatE10/rspd", ref="main", hours=4, github_token=None,
+                  gpu=None, cpu=None, memory=None, image_base="slim",
+                  registry_secret=None, extra_secrets=[],
+                  code_server=False, marimo=False, settings_repo=None,
+                  settings_branch="main", ssh=False, ssh_public_key=None,
+                  ssh_password=None, persist=True, volume_name="agent",
+                  hf_cache_volume="claude-code-hf-cache")
+        kw.update(over)
+        ccm.main(**kw)
+        return modal.LAST_SANDBOX_ARGS[-1]
+
+    def test_no_extra_repos_by_default(self):
+        assert "[extra-repo]" not in self._run()
+
+    def test_extra_repo_is_cloned_beside_the_primary_checkout(self):
+        s = self._run(extra_repos=["owner/tool"])
+        assert f"{ccm.BASE_DIR}/tool" in s
+        # Beside, not inside: a nested repo would confuse git and break tools
+        # that expect to sit next to the project.
+        assert f"{ccm.BASE_DIR}/code/tool" not in s
+
+    def test_extra_repo_honours_a_pinned_ref(self):
+        s = self._run(extra_repos=["owner/tool@abc1234"])
+        assert "abc1234" in s
+
+    def test_multiple_extra_repos(self):
+        s = self._run(extra_repos=["owner/a", "owner/b"])
+        assert f"{ccm.BASE_DIR}/a" in s and f"{ccm.BASE_DIR}/b" in s
+
+    def test_with_launcher_clones_this_repo(self):
+        s = self._run(with_launcher=True)
+        assert ccm.LAUNCHER_REPO in s
+        assert f"{ccm.BASE_DIR}/dev-container" in s
+
+    def test_with_launcher_lands_where_a_sibling_tool_expects_it(self):
+        """RSPD's modal_experiment.py looks for the launcher at
+        <its repo>/../dev-container. The primary checkout is BASE_DIR/code, so
+        BASE_DIR/dev-container is exactly that path — the integration works
+        without anyone setting an env var."""
+        self._run(with_launcher=True)
+        from pathlib import Path
+        assert str(Path(f"{ccm.BASE_DIR}/code").parent / "dev-container") \
+            == f"{ccm.BASE_DIR}/dev-container"
+
+    def test_with_launcher_attaches_modal_credentials(self):
+        """Cloning the launcher is useless without Modal auth — the agent
+        inside could read the code but not create a sandbox."""
+        self._run(with_launcher=True)
+        assert "modal-secret" in modal.NAMED_SECRETS
+
+    def test_modal_secret_name_is_overridable(self):
+        self._run(with_launcher=True, modal_secret="my-modal")
+        assert "my-modal" in modal.NAMED_SECRETS
+        assert "modal-secret" not in modal.NAMED_SECRETS
+
+    def test_modal_secret_can_be_skipped(self):
+        """For an environment that injects credentials some other way."""
+        self._run(with_launcher=True, modal_secret=None)
+        assert not [s for s in modal.NAMED_SECRETS if "modal" in s]
+
+    def test_without_launcher_no_modal_secret_is_attached(self):
+        self._run()
+        assert not [s for s in modal.NAMED_SECRETS if "modal" in s]
+
+    def test_with_launcher_exports_dev_container_dir(self):
+        s = self._run(with_launcher=True)
+        assert f"export DEV_CONTAINER_DIR='{ccm.BASE_DIR}/dev-container'" in s
+
+    def test_dev_container_dir_persists_into_bashrc(self):
+        """The consumer is usually an agent or shell started later, long after
+        the startup script's environment is gone."""
+        s = self._run(with_launcher=True)
+        assert "~/.bashrc" in s
+        assert s.index("export DEV_CONTAINER_DIR") < s.index("~/.bashrc")
+
+    def test_launcher_ref_is_honoured(self):
+        s = self._run(with_launcher=True, launcher_ref="claude/some-branch")
+        assert "claude/some-branch" in s
+
+    def test_explicit_launcher_extra_repo_is_not_duplicated(self):
+        """--with-launcher plus an explicit --extra-repo for the same repo must
+        not clone it twice into the same directory."""
+        s = self._run(with_launcher=True,
+                      extra_repos=[f"{ccm.LAUNCHER_REPO}@dev"])
+        assert s.count(f'mkdir -p "{ccm.BASE_DIR}/dev-container"') == 1
+        assert "dev" in s
+
+    def test_extra_repos_work_without_a_primary_repo(self):
+        s = self._run(repo=None, extra_repos=["owner/tool"])
+        assert f"{ccm.BASE_DIR}/tool" in s
+        assert "advice.detachedHead" in s  # git config still emitted

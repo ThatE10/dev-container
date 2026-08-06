@@ -56,6 +56,11 @@ PORT_SSH      = 22     # sshd — forwarded as a raw TCP (unencrypted) tunnel, n
 
 DEFAULT_IMAGE = "ghcr.io/thate10/dev-container:latest"
 
+# This launcher's own repo. --with-launcher clones it into the sandbox so an
+# agent working in there can commission further sandboxes instead of being
+# limited to the one it is sitting in.
+LAUNCHER_REPO = "ThatE10/dev-container"
+
 # Layers added on top of any base — Node, Claude Code CLI, ttyd, code-server,
 # sshd. code-server installs under /usr/local (on PATH); harmless if the base
 # (the dev-container image) already ships it. Marimo is added via pip_install
@@ -89,6 +94,63 @@ BATCH_SCRIPT = "/tmp/ccm-batch.sh"
 def _shq(s: str) -> str:
     """Single-quote a string for safe interpolation into the startup script."""
     return "'" + str(s).replace("'", "'\\''") + "'"
+
+
+def split_repo_ref(spec: str, default_ref: str = "main") -> tuple[str, str]:
+    """Split an ``owner/repo[@ref]`` spec. Ref defaults to *default_ref*.
+
+    rsplit on '@' so an SSH-style or token-bearing prefix can't confuse it —
+    only the last '@' separates the ref.
+    """
+    if "@" in spec:
+        repo, _, ref = spec.rpartition("@")
+        if repo and ref:
+            return repo, ref
+    return spec, default_ref
+
+
+def clone_block(repo: str, ref: str, clone_dir: str, label: str = "repo") -> list[str]:
+    """Bash that clones *repo* at *ref* into *clone_dir*, idempotently.
+
+    Runs at sandbox startup (not image build) so the checkout lands on the
+    mounted persistent volume and survives restarts. Only clones once — on a
+    persistent volume, later launches just resume the existing checkout.
+
+    init + fetch-by-ref rather than `clone --branch`: `--branch` only accepts a
+    branch or tag name, so a pinned commit SHA (what a reproducible batch run
+    wants) can't be cloned that way. A shallow `fetch origin <ref>` accepts
+    branches, tags *and* SHAs against GitHub, which serves both cases.
+    """
+    return [
+        f'if [ ! -d "{clone_dir}/.git" ]; then',
+        f'  CC_REF={_shq(ref)}',
+        '  if [ -n "$GH_TOKEN" ]; then',
+        f'    CC_URL="https://oauth2:${{GH_TOKEN}}@github.com/{repo}.git"',
+        '  else',
+        f'    CC_URL="https://github.com/{repo}.git"',
+        '  fi',
+        f'  mkdir -p "{clone_dir}"',
+        f'  if GIT_ASKPASS=echo GIT_TERMINAL_PROMPT=0 sh -c \''
+        f'git init -q "$1" && git -C "$1" remote add origin "$2" && '
+        f'git -C "$1" fetch -q --depth 1 origin "$3"\' _ "{clone_dir}" "$CC_URL" "$CC_REF"; then',
+        # A 40-hex ref is a commit: check it out detached. Anything else is a
+        # branch/tag name, so materialise a local branch of that name — an
+        # interactive sandbox expects to be *on* the branch it asked for.
+        "    if printf '%s' \"$CC_REF\" | grep -qE '^[0-9a-f]{7,40}$'; then",
+        f'      git -C "{clone_dir}" checkout -q --detach FETCH_HEAD',
+        '    else',
+        f'      git -C "{clone_dir}" checkout -q -B "$CC_REF" FETCH_HEAD',
+        '    fi',
+        f'    echo "[{label}] cloned {repo}@$CC_REF -> {clone_dir} ('
+        f'$(git -C "{clone_dir}" rev-parse --short HEAD))"',
+        '  else',
+        f'    echo "[{label}] ERROR: fetch of {repo}@$CC_REF failed — check the ref '
+        f'exists and GH_TOKEN has access" >&2',
+        '  fi',
+        'else',
+        f'  echo "[{label}] {clone_dir} already present (persistent volume) — resuming as-is"',
+        'fi',
+    ]
 
 
 def build_image(base: str, registry_secret_name: str | None) -> modal.Image:
@@ -132,7 +194,9 @@ def build_startup(base_dir: str, work_dir: str, code_server: bool, marimo: bool,
                   settings_repo: str | None, settings_branch: str,
                   repo: str | None, ref: str, clone_dir: str | None,
                   post_clone: str | None = None, run_cmd: str | None = None,
-                  exit_on_finish: bool = False) -> str:
+                  exit_on_finish: bool = False,
+                  extra_repos: list[tuple[str, str, str]] | None = None,
+                  extra_env: dict[str, str] | None = None) -> str:
     """Bash run at sandbox start: restore creds, import secrets, clone the repo
     (idempotent — skipped if already present on a persistent volume), optionally
     sync ~/.claude, bring up sshd, launch VS Code + Marimo in the background.
@@ -153,6 +217,10 @@ def build_startup(base_dir: str, work_dir: str, code_server: bool, marimo: bool,
     ``work_dir``, or absolute) run after the checkout and before anything else —
     the hook this launcher previously lacked, for things like linking a venv or
     an artifacts mount into the tree.
+
+    ``extra_repos`` is a list of ``(repo, ref, dir)`` checked out beside the
+    primary one; ``extra_env`` is exported both into this script and into
+    ``~/.bashrc``, so an interactive shell or an agent started later sees it too.
     """
     lines = [
         f'mkdir -p "{base_dir}" ~/.claude',
@@ -164,50 +232,33 @@ def build_startup(base_dir: str, work_dir: str, code_server: bool, marimo: bool,
         'export GITHUB_TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"',
         'export GH_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"',
         # dev-container base ships this importer; slim doesn't (|| true keeps going).
+        # Among other things this turns MODAL_TOKEN_ID/MODAL_TOKEN_SECRET into
+        # ~/.modal.toml, which is what lets an agent inside the sandbox drive
+        # Modal itself.
         "([ -x /opt/scripts/import-secrets.sh ] && /opt/scripts/import-secrets.sh || true)",
     ]
 
+    # Exported here for the startup script *and* appended to ~/.bashrc, because
+    # the thing that usually needs these is an agent or a shell started later —
+    # long after this script's environment is gone.
+    for key, value in (extra_env or {}).items():
+        lines.append(f'export {key}={_shq(value)}')
+        lines.append(
+            f'grep -qxF "export {key}={value}" ~/.bashrc 2>/dev/null '
+            f'|| echo "export {key}={value}" >> ~/.bashrc')
+
+    if (repo and clone_dir) or extra_repos:
+        lines.append("git config --global advice.detachedHead false")
+
     if repo and clone_dir:
-        # Runs at startup (not image build) so the clone lands on the mounted
-        # persistent volume and survives restarts. Only clones once — on a
-        # persistent volume, later launches just resume the existing checkout.
-        #
-        # init + fetch-by-ref rather than `clone --branch`: `--branch` only
-        # accepts a branch or tag name, so a pinned commit SHA (what a
-        # reproducible batch run wants) can't be cloned that way. A shallow
-        # `fetch origin <ref>` accepts branches, tags *and* SHAs against GitHub,
-        # which serves both the interactive and the pinned-run cases.
-        lines += [
-            "git config --global advice.detachedHead false",
-            f'if [ ! -d "{clone_dir}/.git" ]; then',
-            f'  CC_REF={_shq(ref)}',
-            '  if [ -n "$GH_TOKEN" ]; then',
-            f'    CC_URL="https://oauth2:${{GH_TOKEN}}@github.com/{repo}.git"',
-            '  else',
-            f'    CC_URL="https://github.com/{repo}.git"',
-            '  fi',
-            f'  mkdir -p "{clone_dir}"',
-            f'  if GIT_ASKPASS=echo GIT_TERMINAL_PROMPT=0 sh -c \''
-            f'git init -q "$1" && git -C "$1" remote add origin "$2" && '
-            f'git -C "$1" fetch -q --depth 1 origin "$3"\' _ "{clone_dir}" "$CC_URL" "$CC_REF"; then',
-            # A 40-hex ref is a commit: check it out detached. Anything else is a
-            # branch/tag name, so materialise a local branch of that name — an
-            # interactive sandbox expects to be *on* the branch it asked for.
-            "    if printf '%s' \"$CC_REF\" | grep -qE '^[0-9a-f]{7,40}$'; then",
-            f'      git -C "{clone_dir}" checkout -q --detach FETCH_HEAD',
-            '    else',
-            f'      git -C "{clone_dir}" checkout -q -B "$CC_REF" FETCH_HEAD',
-            '    fi',
-            f'    echo "[repo] cloned {repo}@$CC_REF -> {clone_dir} ('
-            f'$(git -C "{clone_dir}" rev-parse --short HEAD))"',
-            '  else',
-            f'    echo "[repo] ERROR: fetch of {repo}@$CC_REF failed — check the ref '
-            f'exists and GH_TOKEN has access" >&2',
-            '  fi',
-            'else',
-            f'  echo "[repo] {clone_dir} already present (persistent volume) — resuming as-is"',
-            'fi',
-        ]
+        lines += clone_block(repo, ref, clone_dir, label="repo")
+
+    # Side-by-side checkouts, cloned next to the primary one under base_dir.
+    # The usual reason is a tool the agent inside needs to *run*, not just read
+    # — see --with-launcher, which puts this launcher's own source here so an
+    # agent in the sandbox can commission further sandboxes.
+    for extra_repo, extra_ref, extra_dir in (extra_repos or []):
+        lines += clone_block(extra_repo, extra_ref, extra_dir, label="extra-repo")
 
     if post_clone:
         # Relative paths resolve inside the checkout, so a repo can ship its own
@@ -386,6 +437,10 @@ def main(
     post_clone: str | None = None,
     extra_volumes: dict[str, str] | None = None,
     detach: bool = False,
+    extra_repos: list[str] | None = None,
+    with_launcher: bool = False,
+    launcher_ref: str = "main",
+    modal_secret: str | None = "modal-secret",
 ) -> int:
     """Launch a sandbox. Returns the batch command's exit status when this is a
     run-then-die launch that we waited on, else 0."""
@@ -406,6 +461,32 @@ def main(
     # survive restarts; without a repo the editor/terminal open at BASE_DIR.
     clone_dir = f"{BASE_DIR}/code" if repo else None
     work_dir = clone_dir or BASE_DIR
+
+    # Side-by-side checkouts. --with-launcher is the common case: it puts this
+    # launcher's own source in the sandbox so an agent inside can commission
+    # further sandboxes — which needs the code *and* Modal credentials, hence
+    # the secret below.
+    specs = list(extra_repos or [])
+    extra_env: dict[str, str] = {}
+    if with_launcher:
+        if not any(split_repo_ref(s)[0] == LAUNCHER_REPO for s in specs):
+            specs.append(f"{LAUNCHER_REPO}@{launcher_ref}")
+        if modal_secret:
+            extra_secrets = list(extra_secrets or [])
+            if modal_secret not in extra_secrets:
+                extra_secrets.append(modal_secret)
+
+    resolved_extra_repos: list[tuple[str, str, str]] = []
+    for spec in specs:
+        spec_repo, spec_ref = split_repo_ref(spec)
+        name = spec_repo.rsplit("/", 1)[-1]
+        # Beside the primary checkout, not inside it: a tool that expects to sit
+        # next to the project (as RSPD's launcher does) then finds it, and git
+        # never sees a nested repo.
+        target = f"{BASE_DIR}/{name}"
+        resolved_extra_repos.append((spec_repo, spec_ref, target))
+        if spec_repo == LAUNCHER_REPO:
+            extra_env["DEV_CONTAINER_DIR"] = target
 
     secrets = [modal.Secret.from_name("claude-code-secret")]  # CLAUDE_CREDENTIALS
     attached_names = ["claude-code-secret"]
@@ -468,7 +549,8 @@ def main(
     startup = build_startup(BASE_DIR, work_dir, code_server, marimo, ssh,
                             settings_repo, settings_branch, repo, ref, clone_dir,
                             post_clone=post_clone, run_cmd=run_cmd,
-                            exit_on_finish=exit_on_finish)
+                            exit_on_finish=exit_on_finish,
+                            extra_repos=resolved_extra_repos, extra_env=extra_env)
 
     # ttyd only runs as part of the keep-alive, which a run-then-die job has
     # none of — asking Modal to tunnel a port nothing listens on is waste.
@@ -585,6 +667,20 @@ if __name__ == "__main__":
                              "~/.claude, ~/.local). Default: derived from --repo, else 'default'. "
                              "Give concurrently-running sandboxes distinct names — two sandboxes "
                              "sharing a volume-name will race on writes.")
+    parser.add_argument("--extra-repo", action="append", default=None,
+                        metavar="owner/repo[@ref]", dest="extra_repos",
+                        help="Clone another repo beside the main checkout, at "
+                             "<workspace>/<repo-name> (repeatable). Ref defaults to main.")
+    parser.add_argument("--with-launcher", action="store_true",
+                        help=f"Clone {LAUNCHER_REPO} into the sandbox and attach Modal "
+                             "credentials, so an agent inside can launch its own "
+                             "sandboxes and batch jobs. Sets $DEV_CONTAINER_DIR.")
+    parser.add_argument("--launcher-ref", default="main",
+                        help="Ref for --with-launcher's checkout (default: main)")
+    parser.add_argument("--modal-secret", default="modal-secret", metavar="NAME",
+                        help="Modal secret holding MODAL_TOKEN_ID / MODAL_TOKEN_SECRET, "
+                             "attached by --with-launcher so the inner agent can "
+                             "authenticate. Pass '' to skip (default: modal-secret)")
     parser.add_argument("--run", default=None, metavar="CMD",
                         help="Run CMD in the checkout instead of just parking on a shell. "
                              "Output is teed to <workspace>/.last_run.log. Combine with "
@@ -641,4 +737,7 @@ if __name__ == "__main__":
                   hf_cache_volume=args.hf_cache_volume,
                   run_cmd=args.run, exit_on_finish=args.exit_on_finish,
                   post_clone=args.post_clone, extra_volumes=extra_volumes,
-                  detach=args.detach))
+                  detach=args.detach,
+                  extra_repos=args.extra_repos, with_launcher=args.with_launcher,
+                  launcher_ref=args.launcher_ref,
+                  modal_secret=args.modal_secret or None))

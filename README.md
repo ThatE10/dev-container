@@ -184,6 +184,42 @@ Parallel jobs must not share a workspace volume (concurrent writers race).
 Give each `--volume-name` of its own, or `--no-persist` and keep only the
 shared results mount.
 
+### Agents that launch their own containers
+
+An agent working inside a sandbox often needs to commission *more* sandboxes —
+to run a GPU job, fan a sweep out, or rebuild something on bigger hardware. It
+can't, unless it has this launcher's source and Modal credentials.
+`--with-launcher` gives it both:
+
+```bash
+python claude_code_modal.py --repo ThatE10/rspd --with-launcher
+```
+
+That clones `ThatE10/dev-container` to `<workspace>/dev-container`, attaches
+the Modal secret (`--modal-secret`, default `modal-secret`, holding
+`MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET`), and exports `$DEV_CONTAINER_DIR` —
+into the shell *and* `~/.bashrc`, since the consumer is usually a process
+started long after launch. `import-secrets.sh` turns those tokens into
+`~/.modal.toml`, so `modal` is authenticated with no further setup.
+
+The checkout lands *beside* the main one rather than inside it, which is what
+a sibling tool expects: RSPD's `modal_experiment.py` looks for the launcher at
+`<its repo>/../dev-container`, and the primary checkout is `<workspace>/code`,
+so the paths line up with nothing to configure.
+
+`--extra-repo owner/repo[@ref]` is the general form (repeatable) for any other
+side-by-side checkout. Both accept a pinned ref.
+
+Two things to know:
+
+- The Modal secret must exist (`modal secret create modal-secret
+  MODAL_TOKEN_ID=... MODAL_TOKEN_SECRET=...`) or sandbox creation fails with a
+  clear error. Pass `--modal-secret ''` to skip it if credentials arrive some
+  other way.
+- Credentials that let a sandbox create more sandboxes are worth scoping
+  deliberately — an agent with them can spend money on GPUs. Prefer a Modal
+  token with the access you actually want the agent to have.
+
 ### Persistent storage on Modal
 
 Presets launched through `launch.py` are **persistent by default** — the same
