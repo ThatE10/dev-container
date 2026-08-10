@@ -513,3 +513,93 @@ class TestMissingSecretHelp:
             raise AssertionError("must not swallow unrelated exceptions")
         except ValueError:
             pass
+
+
+class TestListSandboxes:
+    """`--ls` recovers the way back into a running sandbox.
+
+    Connection details are otherwise printed once, at launch, from a tunnel
+    object living only in that process — so losing the terminal meant losing
+    the SSH endpoint entirely.
+    """
+
+    class _Tunnel:
+        def __init__(self, url=None, sock=None):
+            self.url, self.tcp_socket = url, sock
+
+    class _SB:
+        def __init__(self, oid, tunnels, returncode=None):
+            self.object_id, self._tunnels, self._rc = oid, tunnels, returncode
+
+        def poll(self):
+            return self._rc
+
+        def tunnels(self):
+            if self._tunnels is None:
+                raise RuntimeError("sandbox has no ports")
+            return self._tunnels
+
+    def _interactive(self):
+        return self._SB("sb-aaa", {
+            ccm.PORT_SSH: self._Tunnel(sock=("r1.modal.host", 41234)),
+            ccm.PORT_TERMINAL: self._Tunnel(url="https://term.modal.run"),
+            ccm.PORT_CODE: self._Tunnel(url="https://code.modal.run"),
+        })
+
+    def _install(self, monkeypatch, sandboxes):
+        import types
+        monkeypatch.setattr(modal, "App",
+                            type("A", (), {"lookup": staticmethod(
+                                lambda n, **k: types.SimpleNamespace(app_id="ap-1"))}))
+        monkeypatch.setattr(modal.Sandbox, "list",
+                            staticmethod(lambda **k: iter(sandboxes)), raising=False)
+
+    def test_prints_a_usable_ssh_command(self, monkeypatch, capsys):
+        self._install(monkeypatch, [self._interactive()])
+        ccm.list_sandboxes()
+        assert "ssh root@r1.modal.host -p 41234" in capsys.readouterr().out
+
+    def test_prints_the_service_urls(self, monkeypatch, capsys):
+        self._install(monkeypatch, [self._interactive()])
+        ccm.list_sandboxes()
+        out = capsys.readouterr().out
+        assert "https://term.modal.run" in out and "https://code.modal.run" in out
+
+    def test_finished_sandboxes_are_hidden(self, monkeypatch, capsys):
+        """poll() returns an exit code once a run-then-die job is done; listing
+        those would bury the one box you can actually connect to."""
+        self._install(monkeypatch, [self._interactive(),
+                                    self._SB("sb-done", {}, returncode=0)])
+        ccm.list_sandboxes()
+        out = capsys.readouterr().out
+        assert "sb-aaa" in out and "sb-done" not in out
+        assert "1 running sandbox" in out
+
+    def test_a_sandbox_without_tunnels_is_still_listed(self, monkeypatch, capsys):
+        """A batch job runs with no ports at all — `modal shell` is the only
+        way in, so it must not be dropped from the listing."""
+        self._install(monkeypatch, [self._SB("sb-batch", None)])
+        ccm.list_sandboxes()
+        out = capsys.readouterr().out
+        assert "sb-batch" in out and "modal shell sb-batch" in out
+
+    def test_always_offers_shell_and_stop(self, monkeypatch, capsys):
+        self._install(monkeypatch, [self._interactive()])
+        ccm.list_sandboxes()
+        out = capsys.readouterr().out
+        assert "modal shell sb-aaa" in out
+        assert "modal container stop sb-aaa" in out
+
+    def test_no_sandboxes_is_not_an_error(self, monkeypatch, capsys):
+        self._install(monkeypatch, [])
+        assert ccm.list_sandboxes() == 0
+        assert "No running sandboxes" in capsys.readouterr().out
+
+    def test_missing_app_is_not_an_error(self, monkeypatch, capsys):
+        """Before the first launch the app doesn't exist; that's a normal
+        state, not a crash."""
+        def boom(name, **kw):
+            raise Exception("App not found")
+        monkeypatch.setattr(modal, "App", type("A", (), {"lookup": staticmethod(boom)}))
+        assert ccm.list_sandboxes() == 0
+        assert "Nothing has been launched yet" in capsys.readouterr().out

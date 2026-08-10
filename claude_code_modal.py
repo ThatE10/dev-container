@@ -62,6 +62,10 @@ DEFAULT_IMAGE = "ghcr.io/thate10/dev-container:latest"
 # limited to the one it is sitting in.
 LAUNCHER_REPO = "ThatE10/dev-container"
 
+# Every sandbox this launcher creates lives under one Modal app, which is what
+# makes `--ls` able to find them again.
+APP_NAME = "claude-code-server"
+
 # Layers added on top of any base — Node, Claude Code CLI, ttyd, code-server,
 # sshd. code-server installs under /usr/local (on PATH); harmless if the base
 # (the dev-container image) already ships it. Marimo is added via pip_install
@@ -465,6 +469,66 @@ def volume_slug(raw: str | None) -> str:
     return slug.strip("-") or "default"
 
 
+def describe_sandbox(sandbox, index: int | None = None) -> str:
+    """One running sandbox, with the commands needed to get back into it.
+
+    The connection details are only otherwise printed at launch, from a tunnel
+    object that exists solely in that process — so losing the terminal used to
+    mean losing the way in. Everything here is re-derived live from Modal.
+    """
+    label = f"{index}) " if index is not None else ""
+    lines = [f"{label}{sandbox.object_id}"]
+
+    tunnels = {}
+    try:
+        tunnels = sandbox.tunnels()
+    except Exception as e:  # noqa: BLE001 — a sandbox with no ports is normal
+        lines.append(f"     (no tunnels: {type(e).__name__})")
+
+    if PORT_SSH in tunnels:
+        host, port = tunnels[PORT_SSH].tcp_socket
+        lines.append(f"     ssh          : ssh root@{host} -p {port}")
+    for port, name in ((PORT_TERMINAL, "web terminal"), (PORT_CODE, "VS Code"),
+                       (PORT_MARIMO, "Marimo")):
+        if port in tunnels:
+            lines.append(f"     {name:<13}: {tunnels[port].url}")
+    # Always available, and the fallback when SSH is off (a batch job) or the
+    # tunnel won't cooperate.
+    lines.append(f"     shell        : modal shell {sandbox.object_id}")
+    lines.append(f"     stop         : modal container stop {sandbox.object_id}")
+    return "\n".join(lines)
+
+
+def list_sandboxes(app_name: str = APP_NAME) -> int:
+    """Print the running sandboxes this launcher created, and how to reach them."""
+    try:
+        app = modal.App.lookup(app_name, create_if_missing=False)
+    except Exception as e:  # noqa: BLE001 — nothing launched yet is not an error
+        print(f"No app named {app_name!r} ({type(e).__name__}). "
+              f"Nothing has been launched yet, or you're in another Modal environment.")
+        return 0
+
+    running = []
+    for sandbox in modal.Sandbox.list(app_id=app.app_id):
+        # poll() is None while running; anything else is a finished sandbox,
+        # which for a run-then-die batch job is most of them.
+        try:
+            if sandbox.poll() is None:
+                running.append(sandbox)
+        except Exception:  # noqa: BLE001
+            continue
+
+    if not running:
+        print(f"No running sandboxes in {app_name!r}.")
+        return 0
+
+    print(f"{len(running)} running sandbox(es) in {app_name!r}:\n")
+    for i, sandbox in enumerate(running, 1):
+        print(describe_sandbox(sandbox, i))
+        print()
+    return 0
+
+
 def main(
     repo: str | None,
     ref: str,
@@ -498,7 +562,7 @@ def main(
 ) -> int:
     """Launch a sandbox. Returns the batch command's exit status when this is a
     run-then-die launch that we waited on, else 0."""
-    app = modal.App.lookup("claude-code-server", create_if_missing=True)
+    app = modal.App.lookup(APP_NAME, create_if_missing=True)
 
     # A run-then-die sandbox outlives nothing, so the interactive services are
     # pure overhead — and their tunnels don't exist to print. Use --run without
@@ -697,6 +761,10 @@ def main(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run Claude Code on Modal (web terminal + VS Code + Marimo)")
+    parser.add_argument("--ls", "--list-sandboxes", action="store_true", dest="list_sandboxes",
+                        help="List running sandboxes with their SSH command and tunnel URLs, "
+                             "then exit. Use this when you've lost the terminal you launched "
+                             "from — the connection details are otherwise only printed once.")
     parser.add_argument("--repo", default=None, help="GitHub repo to clone (owner/repo)")
     parser.add_argument("--ref", default="main", help="Branch / tag / SHA (default: main)")
     parser.add_argument("--hours", type=int, default=4, help="Session timeout in hours (default: 4)")
@@ -779,6 +847,10 @@ if __name__ == "__main__":
                              "(default: claude-code-hf-cache; shared across all sandboxes since "
                              "it's mostly read-only after first download)")
     args = parser.parse_args()
+
+    # A pure query — none of the launch arguments apply, so answer and stop.
+    if args.list_sandboxes:
+        sys.exit(list_sandboxes())
     # None → defaults; [''] → user explicitly cleared; otherwise use provided list.
     if args.secrets is None:
         extra = DEFAULT_SECRETS
