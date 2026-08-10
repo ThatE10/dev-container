@@ -210,15 +210,24 @@ so the paths line up with nothing to configure.
 `--extra-repo owner/repo[@ref]` is the general form (repeatable) for any other
 side-by-side checkout. Both accept a pinned ref.
 
-Two things to know:
+**Create the secret first**, or the launch fails:
 
-- The Modal secret must exist (`modal secret create modal-secret
-  MODAL_TOKEN_ID=... MODAL_TOKEN_SECRET=...`) or sandbox creation fails with a
-  clear error. Pass `--modal-secret ''` to skip it if credentials arrive some
-  other way.
-- Credentials that let a sandbox create more sandboxes are worth scoping
-  deliberately — an agent with them can spend money on GPUs. Prefer a Modal
-  token with the access you actually want the agent to have.
+```bash
+modal secret create modal-secret \
+    MODAL_TOKEN_ID=ak-... MODAL_TOKEN_SECRET=as-...
+```
+
+A Modal *Secret* is a named, server-side object, and it is **not** the same as
+the local CLI credentials `modal token set` writes — having run `modal token
+set` does not create it. That is the easy thing to conflate, so the launcher
+catches the missing-secret error and says so rather than surfacing an SDK
+traceback. Pass `--modal-secret ''` to skip the secret if credentials reach the
+sandbox some other way.
+
+Credentials that let a sandbox create more sandboxes are worth scoping
+deliberately — an agent holding them can spend money on GPUs. Prefer a token
+with the access you actually want the agent to have, and rotate it if it ever
+lands somewhere it shouldn't.
 
 ### Persistent storage on Modal
 

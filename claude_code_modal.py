@@ -43,6 +43,7 @@ the same disk. Use --no-persist for a fully ephemeral sandbox.
 """
 import argparse
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -175,6 +176,55 @@ def build_image(base: str, registry_secret_name: str | None) -> modal.Image:
         .pip_install("marimo")  # no-op if the base already has it (dev-container does)
         .env({"TERM": "xterm-256color", "COLORTERM": "truecolor"})
     )
+
+
+def _not_found_error() -> type[BaseException]:
+    """modal.exception.NotFoundError, or a type that never matches.
+
+    Looked up rather than imported so the module still loads against an SDK
+    (or the test stub) that doesn't expose it.
+    """
+    exc = getattr(modal, "exception", None)
+    found = getattr(exc, "NotFoundError", None) if exc else None
+    if isinstance(found, type) and issubclass(found, BaseException):
+        return found
+
+    class _Never(BaseException):
+        pass
+
+    return _Never
+
+
+def _missing_secret_help(error: BaseException, attached: list[str]) -> str:
+    """Turn 'Secret X not found' into something the reader can act on."""
+    text = str(error)
+    m = re.search(r"Secret '([^']+)' not found", text)
+    name = m.group(1) if m else None
+
+    lines = [f"\nModal could not find a secret this launch needs:\n  {text}\n"]
+    if name:
+        hint = ""
+        if name == "modal-secret":
+            # The one --with-launcher adds, and the one people are most likely
+            # not to have: it is only needed so an agent *inside* the sandbox
+            # can drive Modal, which is a niche thing to have set up already.
+            hint = ("\n  This is the credential --with-launcher attaches so an agent inside\n"
+                    "  the sandbox can launch its own containers. Note this is a Modal\n"
+                    "  *Secret* — a named, server-side object — which is not the same as\n"
+                    "  the local CLI credentials `modal token set` writes.\n"
+                    "  Re-run without --with-launcher, or with --modal-secret '', to skip it.")
+        lines.append(
+            f"Create it with:\n"
+            f"  modal secret create {name} KEY=value [KEY=value ...]\n"
+            + (f"\nFor {name} specifically:\n"
+               f"  modal secret create {name} \\\n"
+               f"      MODAL_TOKEN_ID=ak-... MODAL_TOKEN_SECRET=as-...\n" if name == "modal-secret" else "")
+            + hint
+        )
+    lines.append(f"\nSecrets attached to this launch: {', '.join(attached) or '(none)'}")
+    lines.append("Drop one with --secret '' (clears the defaults) or name a different "
+                 "one with --secret NAME.")
+    return "\n".join(lines)
 
 
 def resolve_ssh_public_key(raw: str | None) -> str | None:
@@ -584,7 +634,14 @@ def main(
         sandbox_kwargs["unencrypted_ports"] = [PORT_SSH]
 
     with modal.enable_output():
-        sandbox = modal.Sandbox.create("bash", "-c", startup, **sandbox_kwargs)
+        try:
+            sandbox = modal.Sandbox.create("bash", "-c", startup, **sandbox_kwargs)
+        except _not_found_error() as e:
+            # Secrets resolve lazily, so a missing one surfaces here as a raw
+            # SDK traceback naming a secret the user never chose — the defaults
+            # and --with-launcher both attach secrets by name. Say which names
+            # were attached and how to create the missing one.
+            raise SystemExit(_missing_secret_help(e, attached_names)) from None
 
     if batch_exit:
         # No services, so no tunnels to print — the sandbox is a job, not a box.

@@ -435,3 +435,58 @@ class TestExtraRepos:
         s = self._run(repo=None, extra_repos=["owner/tool"])
         assert f"{ccm.BASE_DIR}/tool" in s
         assert "advice.detachedHead" in s  # git config still emitted
+
+
+class TestMissingSecretHelp:
+    """A missing secret surfaces as a raw SDK traceback naming a secret the
+    user never chose — the defaults and --with-launcher both attach by name.
+    These pin the actionable message that replaces it."""
+
+    def test_names_the_create_command_for_the_missing_secret(self):
+        msg = ccm._missing_secret_help(
+            Exception("Secret 'modal-secret' not found in environment 'main'."),
+            ["claude-code-secret", "modal-secret"])
+        assert "modal secret create modal-secret" in msg
+        assert "MODAL_TOKEN_ID" in msg and "MODAL_TOKEN_SECRET" in msg
+
+    def test_distinguishes_a_modal_secret_from_cli_credentials(self):
+        """`modal token set` writes local CLI credentials and does NOT create
+        the named Secret — the single most likely thing to conflate here."""
+        msg = ccm._missing_secret_help(
+            Exception("Secret 'modal-secret' not found in environment 'main'."), [])
+        assert "modal token set" in msg
+        assert "not the same" in msg
+
+    def test_offers_the_opt_out(self):
+        msg = ccm._missing_secret_help(
+            Exception("Secret 'modal-secret' not found."), [])
+        assert "--modal-secret ''" in msg or "--with-launcher" in msg
+
+    def test_handles_any_other_secret_name(self):
+        msg = ccm._missing_secret_help(
+            Exception("Secret 'huggingface-secret' not found."), ["huggingface-secret"])
+        assert "modal secret create huggingface-secret" in msg
+        # The gemma4/launcher-specific guidance is only for modal-secret.
+        assert "MODAL_TOKEN_ID" not in msg
+
+    def test_lists_what_was_attached(self):
+        msg = ccm._missing_secret_help(Exception("Secret 'x' not found."),
+                                       ["a-secret", "b-secret"])
+        assert "a-secret" in msg and "b-secret" in msg
+
+    def test_survives_an_unparseable_error(self):
+        """Never turn a confusing error into a crash in the error handler."""
+        msg = ccm._missing_secret_help(Exception("something else entirely"), [])
+        assert "something else entirely" in msg
+
+    def test_not_found_lookup_degrades_to_a_type_that_never_matches(self):
+        """Against an SDK (or the test stub) with no modal.exception, the
+        except clause must still be a valid, non-matching exception type."""
+        err = ccm._not_found_error()
+        assert isinstance(err, type) and issubclass(err, BaseException)
+        try:
+            raise ValueError("unrelated")
+        except err:
+            raise AssertionError("must not swallow unrelated exceptions")
+        except ValueError:
+            pass
