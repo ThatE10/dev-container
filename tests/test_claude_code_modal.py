@@ -208,8 +208,28 @@ class TestMain:
         assert modal.CREATED_VOLUMES  # something was created
         assert all(create_if_missing for _, create_if_missing in modal.CREATED_VOLUMES)
 
-    def test_no_persist_mounts_nothing(self):
-        assert self._run(persist=False)["volumes"] == {}
+    def test_no_persist_drops_the_sandbox_trio(self):
+        vols = self._run(persist=False)["volumes"]
+        assert ccm.BASE_DIR not in vols
+        assert "/root/.claude" not in vols
+        assert "/root/.local" not in vols
+
+    def test_no_persist_still_mounts_the_shared_model_cache(self):
+        """The HF cache holds downloaded weights, not per-sandbox state. Tying
+        it to --persist made every ephemeral run re-download them — tens of GB
+        for a large model, which defeats cheap disposable containers."""
+        vols = self._run(persist=False)["volumes"]
+        assert vols[ccm.HF_CACHE_DIR].name == "claude-code-hf-cache"
+
+    def test_model_cache_can_be_skipped_explicitly(self):
+        assert ccm.HF_CACHE_DIR not in self._run(persist=False, hf_cache_volume="")["volumes"]
+        assert ccm.HF_CACHE_DIR not in self._run(persist=True, hf_cache_volume="")["volumes"]
+
+    def test_model_cache_is_shared_not_per_volume_name(self):
+        """Two differently-named sandboxes must hit the same weights cache."""
+        a = self._run(persist=True, volume_name="one")["volumes"][ccm.HF_CACHE_DIR].name
+        b = self._run(persist=True, volume_name="two")["volumes"][ccm.HF_CACHE_DIR].name
+        assert a == b == "claude-code-hf-cache"
 
     def test_ssh_exposes_unencrypted_port_22(self):
         assert self._run(ssh=True).get("unencrypted_ports") == [ccm.PORT_SSH]
@@ -310,10 +330,13 @@ class TestMainBatch:
 
     def test_extra_volumes_work_without_persist(self):
         """An ephemeral workspace can still write to a shared artifacts volume —
-        that split is the whole point of the mount flag."""
+        that split is the whole point of the mount flag. The shared model cache
+        rides along too, so a run-then-die job neither loses its results nor
+        re-downloads its weights."""
         vols = self._run(persist=False,
                          extra_volumes={"/root/artifacts": "rspd-artifacts"})["volumes"]
-        assert set(vols) == {"/root/artifacts"}
+        assert set(vols) == {"/root/artifacts", ccm.HF_CACHE_DIR}
+        assert ccm.BASE_DIR not in vols
 
     def test_post_clone_reaches_the_startup_script(self):
         self._run(post_clone="docker/link_env.sh")

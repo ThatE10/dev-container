@@ -445,6 +445,10 @@ DEFAULT_SECRETS = ["huggingface-secret", "github-secret"]
 # that survives sandbox restarts (unlike the rest of the filesystem).
 BASE_DIR = "/root/workspace"
 
+# Where the shared model cache mounts. Kept separate from the persist trio: it
+# holds downloaded weights, which are worth keeping even for a throwaway box.
+HF_CACHE_DIR = "/root/.cache/huggingface"
+
 
 def volume_slug(raw: str | None) -> str:
     """Normalize a volume-name (or --repo / 'default' fallback) into a slug.
@@ -581,13 +585,25 @@ def main(
             BASE_DIR: modal.Volume.from_name(f"ccm-{slug}-workspace", create_if_missing=True),
             "/root/.claude": modal.Volume.from_name(f"ccm-{slug}-claude", create_if_missing=True),
             "/root/.local": modal.Volume.from_name(f"ccm-{slug}-local", create_if_missing=True),
-            "/root/.cache/huggingface": modal.Volume.from_name(hf_cache_volume, create_if_missing=True),
         }
-        print(f"Persistent storage: ccm-{slug}-{{workspace,claude,local}} + shared "
-              f"'{hf_cache_volume}'. Reuse --volume-name {slug} to resume; don't run two "
-              f"sandboxes with the same --volume-name at once (concurrent writers race).")
+        print(f"Persistent storage: ccm-{slug}-{{workspace,claude,local}}. "
+              f"Reuse --volume-name {slug} to resume; don't run two sandboxes with the "
+              f"same --volume-name at once (concurrent writers race).")
     else:
-        print("Persistent storage: disabled (--no-persist) — sandbox filesystem is ephemeral.")
+        print("Persistent storage: disabled (--no-persist) — workspace, ~/.claude and "
+              "~/.local are ephemeral.")
+
+    # The HuggingFace cache is mounted whether or not the sandbox itself
+    # persists. It is *shared* and read-mostly — downloaded model weights, not
+    # per-sandbox state — so tying it to --persist meant every ephemeral run
+    # re-downloaded them. For a run-then-die batch job that is the difference
+    # between a fast start and re-fetching tens of GB per run, which defeats
+    # the point of cheap disposable containers.
+    if hf_cache_volume:
+        volumes[HF_CACHE_DIR] = modal.Volume.from_name(hf_cache_volume,
+                                                       create_if_missing=True)
+        print(f"Model cache: shared '{hf_cache_volume}' -> {HF_CACHE_DIR} "
+              f"(survives --no-persist; pass --hf-cache-volume '' to skip)")
 
     # Caller-supplied mounts, e.g. a project's shared artifacts volume. Kept
     # deliberately opaque — this launcher doesn't need to know what they hold.

@@ -236,12 +236,18 @@ context that survives `make down` locally now survives a Modal sandbox
 shutdown too. Each preset is backed by a named set of Modal Volumes mirroring
 the Docker volumes above:
 
-| Persisted                                     | Mounted at              |
-| --------------------------------------------- | ----------------------- |
-| Project code + per-project `.venv`s           | `/root/workspace`       |
-| code-server extensions/settings, shell history, `pip install --user` | `/root/.local` |
-| Claude Code config & chat history             | `/root/.claude`         |
-| Downloaded model weights (HuggingFace)        | `/root/.cache/huggingface` |
+| Persisted                                     | Mounted at              | Scope |
+| --------------------------------------------- | ----------------------- | ----- |
+| Project code + per-project `.venv`s           | `/root/workspace`       | per `--volume-name` |
+| code-server extensions/settings, shell history, `pip install --user` | `/root/.local` | per `--volume-name` |
+| Claude Code config & chat history             | `/root/.claude`         | per `--volume-name` |
+| Downloaded model weights (HuggingFace)        | `/root/.cache/huggingface` | **shared, always mounted** |
+
+The first three are what `--no-persist` turns off. The model cache is
+deliberately not among them: it holds downloaded weights rather than
+per-sandbox state, so it mounts even for an ephemeral box — otherwise every
+run-then-die job would re-fetch tens of GB, which rather defeats the point of
+cheap disposable containers. Skip it with `--hf-cache-volume ''`.
 
 The volume name defaults to the preset name, so relaunching the same preset
 restores its state — but presets and volumes are decoupled. Creating a preset
