@@ -46,6 +46,58 @@ class TestResolveSSHKey:
         assert ccm.resolve_ssh_public_key(None) is None
 
 
+class TestBuildImage:
+    """The stub _Image records every builder call as (tag, args), so these
+    assert on the exact layer sequence build_image() would send to Modal."""
+
+    @staticmethod
+    def _tags(img):
+        return [tag for tag, _ in img.commands]
+
+    @staticmethod
+    def _args(img, tag):
+        return [a for t, a in img.commands if t == tag]
+
+    def test_registry_base_gets_the_interactive_layers_by_default(self):
+        modal.reset()
+        img = ccm.build_image("ghcr.io/thate10/dev-container:latest", "ghcr-secret")
+        assert self._tags(img) == ["dockerfile", "run_commands", "pip_install", "env"]
+        assert self._args(img, "run_commands") == [ccm._LAYER_CMDS]
+        assert self._args(img, "pip_install") == [("marimo",)]
+
+    def test_batch_image_skips_the_layers_and_marimo(self):
+        """A run-then-die job uses none of _LAYER_CMDS, and pip_install would
+        invoke the *base image's* `python` — absent on python3-only bases."""
+        modal.reset()
+        img = ccm.build_image("ghcr.io/thate10/rspd-runtime:latest", "ghcr-secret",
+                              interactive_layers=False)
+        assert self._tags(img) == ["dockerfile", "env"]
+        assert "run_commands" not in self._tags(img)
+        assert "pip_install" not in self._tags(img)
+
+    def test_entrypoint_override_and_env_survive_the_gate(self):
+        modal.reset()
+        img = ccm.build_image("ghcr.io/x/y:latest", None, interactive_layers=False)
+        assert self._args(img, "dockerfile") == [("ENTRYPOINT []",)]
+        assert self._args(img, "env") == [({"TERM": "xterm-256color",
+                                            "COLORTERM": "truecolor"},)]
+
+    def test_registry_secret_is_still_looked_up_when_gated(self):
+        modal.reset()
+        ccm.build_image("ghcr.io/x/y:latest", "ghcr-secret", interactive_layers=False)
+        assert modal.NAMED_SECRETS == ["ghcr-secret"]
+
+    def test_slim_base_keeps_its_apt_layer_either_way(self):
+        modal.reset()
+        full = ccm.build_image("slim", None)
+        assert self._tags(full) == ["apt_install", "run_commands", "pip_install", "env"]
+        gated = ccm.build_image("slim", None, interactive_layers=False)
+        assert self._tags(gated) == ["apt_install", "env"]
+        # git/curl/bash/python3 come from the slim branch, not _LAYER_CMDS, so
+        # the batch startup script's clone still has git.
+        assert self._args(gated, "apt_install") == [("curl", "git", "bash", "python3")]
+
+
 class TestBuildStartup:
     def _startup(self, **over):
         kw = dict(base_dir="/root/workspace", work_dir="/root/workspace",
@@ -276,10 +328,22 @@ class TestMainBatch:
         assert "code-server --auth none" not in startup
         assert "exec /usr/sbin/sshd" not in startup
 
+    def test_batch_exit_also_drops_the_interactive_image_layers(self):
+        k = self._run()
+        tags = [tag for tag, _ in k["image"].commands]
+        assert "run_commands" not in tags
+        assert "pip_install" not in tags
+
     def test_run_without_exit_on_finish_keeps_the_services(self):
         k = self._run(exit_on_finish=False)
         assert ccm.PORT_CODE in k["encrypted_ports"]
         assert k["unencrypted_ports"] == [ccm.PORT_SSH]
+
+    def test_run_without_exit_on_finish_keeps_the_image_layers(self):
+        """Still an interactive box afterwards, so it still needs the tooling."""
+        k = self._run(exit_on_finish=False)
+        tags = [tag for tag, _ in k["image"].commands]
+        assert tags == ["apt_install", "run_commands", "pip_install", "env"]
 
     def test_batch_waits_and_returns_the_command_status(self):
         self._run(returncode=0)

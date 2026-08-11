@@ -154,7 +154,8 @@ def clone_block(repo: str, ref: str, clone_dir: str, label: str = "repo") -> lis
     ]
 
 
-def build_image(base: str, registry_secret_name: str | None) -> modal.Image:
+def build_image(base: str, registry_secret_name: str | None,
+                interactive_layers: bool = True) -> modal.Image:
     """Build the sandbox image.
 
     base = 'slim' → debian_slim (fast, CPU-only, no CUDA userspace).
@@ -162,6 +163,15 @@ def build_image(base: str, registry_secret_name: str | None) -> modal.Image:
     for private registries. dev-container's ENTRYPOINT is stripped so we control
     startup directly instead of going through its SSH/banner setup — sshd is
     started explicitly at sandbox startup (see build_startup) instead.
+
+    ``interactive_layers`` controls whether _LAYER_CMDS + Marimo are baked in.
+    They exist solely for the interactive surfaces (code-server, ttyd, sshd, the
+    Claude Code CLI), so a run-then-die batch job — which only executes its
+    ``--run`` command — needs none of them: skipping them saves ~46s of build on
+    every launch. It also avoids a hard failure on bases that ship no ``python``:
+    ``.pip_install`` runs the *base image's* interpreter as ``python`` (we pull
+    with ``add_python=None``), so an unconditional Marimo layer breaks any base
+    that only provides ``python3`` — e.g. the vLLM-derived RSPD runtime.
     """
     if base == "slim":
         img = modal.Image.debian_slim().apt_install("curl", "git", "bash", "python3")
@@ -171,11 +181,12 @@ def build_image(base: str, registry_secret_name: str | None) -> modal.Image:
             modal.Image.from_registry(base, add_python=None, secret=secret)
             .dockerfile_commands("ENTRYPOINT []")  # bypass dev-container's SSH+banner entrypoint
         )
-    return (
-        img.run_commands(*_LAYER_CMDS)
-        .pip_install("marimo")  # no-op if the base already has it (dev-container does)
-        .env({"TERM": "xterm-256color", "COLORTERM": "truecolor"})
-    )
+    if interactive_layers:
+        img = (
+            img.run_commands(*_LAYER_CMDS)
+            .pip_install("marimo")  # no-op if the base already has it (dev-container does)
+        )
+    return img.env({"TERM": "xterm-256color", "COLORTERM": "truecolor"})
 
 
 def _not_found_error() -> type[BaseException]:
@@ -505,7 +516,7 @@ def main(
 
     # A registry secret only makes sense for a real registry pull.
     secret_name = registry_secret if image_base != "slim" else None
-    work_image = build_image(image_base, secret_name)
+    work_image = build_image(image_base, secret_name, interactive_layers=not batch_exit)
 
     # Repo clones land on the persistent workspace volume (BASE_DIR/code) so they
     # survive restarts; without a repo the editor/terminal open at BASE_DIR.
