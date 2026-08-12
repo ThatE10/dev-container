@@ -23,9 +23,20 @@ its work needs), and your own presets.json, which always wins. Launching a
 catalog preset adopts a local copy; until then the catalog stays its source of
 truth and is never written back to.
 
-  python launch.py            # menu (also offers [new preset] / [remove a preset])
+Presets are editable: pick [edit a preset] from the menu (or append 'e' to a
+menu choice, e.g. '1e', or run --edit N) to walk back through the same
+questions that created it, with the current values as defaults — Enter keeps a
+field, '-' clears an optional one.
+
+Every preset line, the GPU picker and the launch confirmation carry an
+estimated cost (hourly rate, plus the ceiling if the session runs its full
+length) computed from Modal's list prices in GPU_HOURLY / CPU_CORE_HOURLY /
+MEM_GIB_HOURLY — edit those if your account's rates differ.
+
+  python launch.py            # menu ([new preset] / [edit a preset] / [remove a preset])
   python launch.py --list     # print presets, exit
   python launch.py --volumes  # print storage volumes and which presets use them
+  python launch.py --edit N   # edit preset #N
   python launch.py --forget N # delete preset #N
   python launch.py --presets P  # merge in an extra preset catalog
 """
@@ -64,6 +75,67 @@ GPU_CHOICES = [
     ("H100",         "H100"),
     ("H200",         "H200"),
 ]
+
+
+# Modal's published on-demand rates (USD/hour), as of 2026-08. These drive the
+# launcher's cost estimates only — Modal bills per second for what actually
+# runs, and prices change; https://modal.com/pricing is the authority. Override
+# a rate here if yours differ (committed/enterprise pricing).
+GPU_HOURLY = {
+    "T4": 0.59,
+    "L4": 0.80,
+    "A10G": 1.10,
+    "L40S": 1.95,
+    "A100-40GB": 2.10,
+    "A100-80GB": 2.50,
+    "H100": 3.95,
+    "H200": 4.54,
+}
+CPU_CORE_HOURLY = 0.047     # $0.0000131 per core-second
+MEM_GIB_HOURLY = 0.008      # $0.00000222 per GiB-second
+
+
+def gpu_hourly(gpu: str | None) -> float | None:
+    """Hourly GPU cost for a preset's ``gpu`` string ("H100", "A100-80GB:2"),
+    None if the type isn't in the table (so callers can say "unknown" rather
+    than quote a wrong number)."""
+    if not gpu:
+        return 0.0
+    kind, _, count = gpu.partition(":")
+    rate = GPU_HOURLY.get(kind)
+    if rate is None:
+        return None
+    try:
+        n = int(count) if count else 1
+    except ValueError:
+        n = 1
+    return rate * n
+
+
+def hourly_cost(p: dict) -> float | None:
+    """Estimated USD/hour for a preset while its sandbox is running, or None if
+    any component's rate is unknown."""
+    gpu = gpu_hourly(p.get("gpu"))
+    if gpu is None:
+        return None
+    return (gpu
+            + float(p.get("cpu", 0)) * CPU_CORE_HOURLY
+            + float(p.get("memory", 0)) / 1024 * MEM_GIB_HOURLY)
+
+
+def session_cost(p: dict) -> float | None:
+    """Estimated cost of running a preset for its full session length — the
+    ceiling, since a sandbox that exits early stops billing."""
+    rate = hourly_cost(p)
+    return None if rate is None else rate * float(p.get("hours", 0))
+
+
+def cost_note(p: dict) -> str:
+    """One-line cost estimate for a preset, e.g. '~$2.79/h · ~$22.29 for 8h'."""
+    rate, total = hourly_cost(p), session_cost(p)
+    if rate is None:
+        return "cost: unknown GPU rate"
+    return f"~${rate:,.2f}/h · ~${total:,.2f} for {p.get('hours', 0)}h"
 
 
 def slugify(name: str) -> str:
@@ -202,6 +274,24 @@ def prompt(label: str, default: str | None = None) -> str | None:
     return value if value else default
 
 
+def prompt_optional(label: str, current: str | None) -> str | None:
+    """Prompt for a value that may legitimately be empty.
+
+    Enter keeps ``current``; typing ``-`` clears it. Without the explicit clear
+    token an editable field could only ever be changed, never emptied, since a
+    blank line already means "keep".
+    """
+    hint = f"{label} ('-' = none)" if current else label
+    value = prompt(hint, current or "")
+    return None if not value or value == "-" else value
+
+
+def prompt_list(label: str, current: list[str] | None) -> list[str]:
+    """Comma-separated list field. Enter keeps ``current``; ``-`` empties it."""
+    raw = prompt_optional(label, ", ".join(current or []) or None)
+    return [s.strip() for s in (raw or "").split(",") if s.strip()]
+
+
 def yesno(label: str, default: bool = False) -> bool:
     d = "Y/n" if default else "y/N"
     v = input(f"  {label} [{d}]: ").strip().lower()
@@ -210,12 +300,23 @@ def yesno(label: str, default: bool = False) -> bool:
     return v.startswith("y")
 
 
-def choose_image() -> str:
+def _default_index(choices: list[tuple[str, str | None]], value: str | None) -> int:
+    """1-based menu position of ``value`` in ``choices``, or 1 if it isn't there
+    (an image typed by hand, say, or a GPU the table no longer lists)."""
+    for i, (_, v) in enumerate(choices, 1):
+        if v == value:
+            return i
+    return 1
+
+
+def choose_image(default: str | None = None) -> str:
     print("\n  base image:")
     for i, (label, _) in enumerate(IMAGE_CHOICES, 1):
         print(f"    {i}) {label}")
+    default_idx = _default_index(IMAGE_CHOICES, default)
     while True:
-        raw = input(f"    choose [1-{len(IMAGE_CHOICES)}] (default 1): ").strip() or "1"
+        raw = input(f"    choose [1-{len(IMAGE_CHOICES)}] "
+                    f"(default {default_idx}): ").strip() or str(default_idx)
         try:
             idx = int(raw) - 1
             if 0 <= idx < len(IMAGE_CHOICES):
@@ -225,12 +326,19 @@ def choose_image() -> str:
         print("    invalid choice.")
 
 
-def choose_gpu() -> str | None:
+def choose_gpu(default: str | None = None) -> str | None:
+    # A stored GPU may carry a count ("A100-80GB:2"); split it so the menu can
+    # preselect the type and the count prompt can preselect the number.
+    kind, _, count = (default or "").partition(":")
     print("\n  GPU:")
-    for i, (label, _) in enumerate(GPU_CHOICES, 1):
-        print(f"    {i}) {label}")
+    for i, (label, value) in enumerate(GPU_CHOICES, 1):
+        rate = GPU_HOURLY.get(value)
+        price = f"  ~${rate:,.2f}/h" if rate else ""
+        print(f"    {i}) {label}{price}")
+    default_idx = _default_index(GPU_CHOICES, kind or None)
     while True:
-        raw = input(f"    choose [1-{len(GPU_CHOICES)}] (default 1): ").strip() or "1"
+        raw = input(f"    choose [1-{len(GPU_CHOICES)}] "
+                    f"(default {default_idx}): ").strip() or str(default_idx)
         try:
             idx = int(raw) - 1
             if 0 <= idx < len(GPU_CHOICES):
@@ -241,7 +349,7 @@ def choose_gpu() -> str | None:
         print("    invalid choice.")
     if base is None:
         return None
-    n = prompt("how many GPUs", "1")
+    n = prompt("how many GPUs", count if base == kind and count else "1")
     return f"{base}:{n}" if n and n != "1" else base
 
 
@@ -328,37 +436,52 @@ def override_volume_flow(presets: list[dict], preset: dict) -> tuple[bool, str |
     return picked
 
 
-def create_preset(presets: list[dict]) -> dict:
-    print("\n── new preset ──")
-    name = prompt("name (e.g. 'sae-lens-a100')")
+def preset_form(presets: list[dict], base: dict | None = None) -> dict:
+    """Ask the full set of preset questions, offering ``base``'s values as
+    defaults.
+
+    Shared by creation (``base=None``) and editing, so a preset is retuned with
+    exactly the questions that built it: Enter keeps a field, '-' clears an
+    optional one. Keys ``base`` carries that aren't asked about here (usage
+    count, launcher_ref, modal_secret, ...) are preserved.
+    """
+    cur = base or {}
+    name = prompt("name (e.g. 'sae-lens-a100')", cur.get("name"))
     if not name:
         print("aborted.")
         sys.exit(1)
-    image = choose_image()
-    gpu = choose_gpu()
-    cpu = prompt("cpu cores", "2")
-    memory = prompt("memory MiB", "4096")
-    repo = prompt("repo (owner/repo, blank = none)", "") or None
-    ref = prompt("ref (branch/tag/sha)", "main") if repo else None
-    hours = prompt("session hours", "4")
-    code_server = yesno("browser VS Code (code-server)?", True)
-    marimo = yesno("Marimo notebooks?", True)
-    settings_repo = prompt("global ~/.claude settings repo (blank = none)",
-                           "ThatE10/claude-code-settings") or None
-    use_gh_token = yesno("use `gh auth token` (private repo)?", False) if repo else False
+    image = choose_image(cur.get("image", DEFAULT_IMAGE) if base else None)
+    gpu = choose_gpu(cur.get("gpu"))
+    cpu = prompt("cpu cores", str(cur.get("cpu", 2)))
+    memory = prompt("memory MiB", str(cur.get("memory", 4096)))
+    repo = prompt_optional("repo (owner/repo, blank = none)", cur.get("repo"))
+    ref = prompt("ref (branch/tag/sha)", cur.get("ref") or "main") if repo else None
+    hours = prompt("session hours", str(cur.get("hours", 4)))
+    code_server = yesno("browser VS Code (code-server)?", cur.get("code_server", True))
+    marimo = yesno("Marimo notebooks?", cur.get("marimo", True))
+    settings_repo = prompt_optional(
+        "global ~/.claude settings repo (blank = none)",
+        cur.get("settings_repo", "ThatE10/claude-code-settings") if not base
+        else cur.get("settings_repo"))
+    use_gh_token = (yesno("use `gh auth token` (private repo)?",
+                          cur.get("use_gh_token", False)) if repo else False)
     with_launcher = yesno(
         "clone this launcher into the sandbox, so an agent inside can launch "
-        "its own containers/jobs? (adds Modal credentials)", False)
-    extra_raw = prompt("other repos to clone alongside (owner/repo[@ref], "
-                       "comma-separated, blank = none)", "")
-    extra_repos = [s.strip() for s in (extra_raw or "").split(",") if s.strip()]
-    secrets_raw = prompt("extra Modal secrets (comma-separated, blank = none)",
-                         ",".join(DEFAULT_EXTRA_SECRETS))
-    extra_secrets = [s.strip() for s in (secrets_raw or "").split(",") if s.strip()]
+        "its own containers/jobs? (adds Modal credentials)",
+        cur.get("with_launcher", False))
+    extra_repos = prompt_list("other repos to clone alongside (owner/repo[@ref], "
+                              "comma-separated, blank = none)", cur.get("extra_repos"))
+    extra_secrets = prompt_list("extra Modal secrets (comma-separated, blank = none)",
+                                cur.get("extra_secrets", DEFAULT_EXTRA_SECRETS))
+    # An explicitly ephemeral preset keeps that as its default; everything else
+    # preselects its own volume (or the new name's slug).
+    vol_default = (None if base and not cur.get("persist", True)
+                   else cur.get("volume") or slugify(name))
     persist, volume = choose_volume(
-        presets, default=slugify(name),
+        presets, default=vol_default, current_preset=cur.get("name"),
         title="storage volume (reuse an existing one to share storage between presets)")
     return {
+        **cur,
         "name": name,
         "image": image,
         "gpu": gpu,
@@ -376,8 +499,51 @@ def create_preset(presets: list[dict]) -> dict:
         "extra_repos": extra_repos,
         "persist": persist,
         "volume": volume,
-        "count": 0,
+        "count": cur.get("count", 0),
     }
+
+
+def create_preset(presets: list[dict]) -> dict:
+    print("\n── new preset ──")
+    return preset_form(presets)
+
+
+def edit_preset(presets: list[dict], preset: dict) -> dict:
+    """Re-run the preset questions over ``preset`` and update it in place.
+
+    Editing adopts a shared catalog preset the same way launching does — the
+    edits have to live somewhere, and that somewhere is the user's own file.
+    """
+    print(f"\n── edit preset: {preset['name']} ──")
+    print("  (Enter keeps the current value; '-' clears an optional one)")
+    updated = preset_form(presets, preset)
+    updated[SOURCE_KEY] = "user"
+    preset.clear()
+    preset.update(updated)
+    save_presets(presets)
+    print(f"  saved preset: {preset['name']}")
+    return preset
+
+
+def edit_flow(presets: list[dict]) -> None:
+    """Interactive edit: ask which preset to edit, then edit it. Operates on
+    ``presets`` in its current (already-sorted) order so the numbers shown in
+    the menu match. No-op on blank/invalid input."""
+    if not presets:
+        print("  no presets to edit.")
+        return
+    raw = input(f"  edit which? [1-{len(presets)}] (blank = cancel): ").strip()
+    if not raw:
+        print("  cancelled.")
+        return
+    try:
+        idx = int(raw)
+        if not 1 <= idx <= len(presets):
+            raise IndexError(idx)
+    except (ValueError, IndexError):
+        print(f"  no preset #{raw}.")
+        return
+    edit_preset(presets, presets[idx - 1])
 
 
 def summarize(p: dict) -> str:
@@ -402,7 +568,8 @@ def summarize(p: dict) -> str:
         extras.append(f"+{len(p['extra_repos'])} repo(s)")
     extra_s = " " + " ".join(extras) if extras else ""
     return (f"{p['name']:<22} [{img_short}] {gpu:<12} {p['cpu']}c {p['memory']}Mi · "
-            f"{p['hours']}h {svc_s}{store}{repo}{extra_s}  (used {used}×){origin}")
+            f"{p['hours']}h {svc_s}{store}{repo}{extra_s}  ({cost_note(p)}) "
+            f"(used {used}×){origin}")
 
 
 def build_cmd(preset: dict) -> list[str]:
@@ -466,6 +633,11 @@ def launch(preset: dict) -> int:
     if preset.get("ssh", True):
         ensure_ssh_key()
     cmd = build_cmd(preset)
+    # Cost is the thing most worth seeing right before committing to a sandbox:
+    # the hourly rate is what you pay while it runs, the total is the ceiling if
+    # it runs the whole session. Stopping the sandbox early stops the meter.
+    print(f"\n  estimated cost: {cost_note(preset)} (Modal list prices; "
+          f"billed per second — stop the sandbox early to pay less)")
     # Don't echo the gh token if present.
     printable = [("<gh-token>" if i > 0 and cmd[i - 1] == "--github-token" else a)
                  for i, a in enumerate(cmd)]
@@ -497,6 +669,14 @@ def delete_preset_at(presets: list[dict], idx: int) -> dict:
     if not 1 <= idx <= len(presets):
         raise IndexError(idx)
     return presets.pop(idx - 1)
+
+
+def cmd_edit(presets: list[dict], idx: int) -> None:
+    presets.sort(key=lambda p: -p.get("count", 0))
+    if not 1 <= idx <= len(presets):
+        print(f"no preset #{idx}.")
+        sys.exit(1)
+    edit_preset(presets, presets[idx - 1])
 
 
 def cmd_forget(presets: list[dict], idx: int) -> None:
@@ -541,20 +721,25 @@ def menu(presets: list[dict]) -> None:
             print(f"  {i}) {summarize(p)}")
         new_idx = len(presets) + 1
         print(f"  {new_idx}) [new preset]")
-        remove_idx = new_idx + 1 if presets else None
-        if remove_idx:
+        edit_idx = new_idx + 1 if presets else None
+        remove_idx = new_idx + 2 if presets else None
+        if presets:
+            print(f"  {edit_idx}) [edit a preset]")
             print(f"  {remove_idx}) [remove a preset]")
 
         if not presets:
             choice = str(new_idx)
         else:
             choice = input(f"\nchoose [1-{remove_idx}] (default 1; append 'v' to pick "
-                           f"the storage volume, e.g. '1v'): ").strip() or "1"
+                           f"the storage volume or 'e' to edit, e.g. '1v', "
+                           f"'1e'): ").strip() or "1"
 
         # 'Nv' launches preset N on a volume you pick (one-off unless saved);
-        # a bare 'v' means the default preset with the volume picker.
+        # 'Ne' edits preset N instead of launching it. A bare suffix means the
+        # default preset.
         pick_volume = choice.lower().endswith("v")
-        if pick_volume:
+        edit_choice = choice.lower().endswith("e")
+        if pick_volume or edit_choice:
             choice = choice[:-1].strip() or "1"
 
         try:
@@ -562,6 +747,19 @@ def menu(presets: list[dict]) -> None:
         except ValueError:
             print("invalid choice.")
             sys.exit(1)
+
+        if edit_choice:
+            if 0 <= idx < len(presets):
+                edit_preset(presets, presets[idx])
+            else:
+                print("invalid choice.")
+            print()  # spacer before the menu redraws
+            continue
+
+        if edit_idx is not None and idx == edit_idx - 1:
+            edit_flow(presets)
+            print()
+            continue
 
         if remove_idx is not None and idx == remove_idx - 1:
             remove_flow(presets)
@@ -598,6 +796,8 @@ def main() -> None:
     parser.add_argument("--list", action="store_true", help="Print presets and exit")
     parser.add_argument("--volumes", action="store_true",
                         help="Print storage volumes and which presets use them, then exit")
+    parser.add_argument("--edit", type=int, metavar="N",
+                        help="Edit preset #N (same questions that created it)")
     parser.add_argument("--forget", type=int, metavar="N", help="Delete preset #N")
     parser.add_argument("--presets", action="append", default=None, metavar="PATH",
                         help="Extra preset catalog to merge in, e.g. a catalog versioned "
@@ -610,6 +810,8 @@ def main() -> None:
         cmd_list(presets)
     elif args.volumes:
         cmd_volumes(presets)
+    elif args.edit is not None:
+        cmd_edit(presets, args.edit)
     elif args.forget is not None:
         cmd_forget(presets, args.forget)
     else:
