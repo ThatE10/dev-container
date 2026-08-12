@@ -338,6 +338,246 @@ class TestRemoveFlow:
         assert not saved
 
 
+class TestCostEstimates:
+    def test_gpu_rate_from_table(self):
+        assert launch.gpu_hourly("H100") == pytest.approx(launch.GPU_HOURLY["H100"])
+
+    def test_gpu_count_multiplies(self):
+        assert launch.gpu_hourly("A100-80GB:2") == pytest.approx(
+            launch.GPU_HOURLY["A100-80GB"] * 2)
+
+    def test_no_gpu_is_free(self):
+        assert launch.gpu_hourly(None) == 0.0
+
+    def test_unknown_gpu_is_unknown_not_zero(self):
+        assert launch.gpu_hourly("B200") is None
+        assert launch.hourly_cost(_preset(gpu="B200")) is None
+        assert launch.session_cost(_preset(gpu="B200")) is None
+        assert "unknown" in launch.cost_note(_preset(gpu="B200"))
+
+    def test_hourly_adds_cpu_and_memory(self):
+        p = _preset(gpu=None, cpu=4.0, memory=8192)
+        assert launch.hourly_cost(p) == pytest.approx(
+            4 * launch.CPU_CORE_HOURLY + 8 * launch.MEM_GIB_HOURLY)
+
+    def test_session_cost_is_rate_times_hours(self):
+        p = _preset(gpu="T4", cpu=2.0, memory=4096, hours=6)
+        assert launch.session_cost(p) == pytest.approx(launch.hourly_cost(p) * 6)
+
+    def test_cost_note_shows_rate_and_total(self):
+        note = launch.cost_note(_preset(gpu="T4", cpu=2.0, memory=4096, hours=6))
+        assert "/h" in note and "for 6h" in note
+
+    def test_summarize_carries_the_cost(self):
+        assert "/h" in launch.summarize(_preset(gpu="T4"))
+
+    def test_cheaper_gpu_estimates_less(self):
+        cheap = launch.session_cost(_preset(gpu="T4"))
+        dear = launch.session_cost(_preset(gpu="H100"))
+        assert cheap < dear
+
+
+class TestChooseGpuDefaults:
+    def test_default_preselects_stored_gpu(self, monkeypatch):
+        _feed(monkeypatch, ["", ""])  # keep the type, keep the count
+        assert launch.choose_gpu("L40S") == "L40S"
+
+    def test_default_keeps_multi_gpu_count(self, monkeypatch):
+        _feed(monkeypatch, ["", ""])
+        assert launch.choose_gpu("A100-80GB:2") == "A100-80GB:2"
+
+    def test_unknown_stored_gpu_falls_back_to_first_option(self, monkeypatch):
+        _feed(monkeypatch, [""])  # option 1 is 'none (CPU only)'
+        assert launch.choose_gpu("B200") is None
+
+    def test_no_default_keeps_cpu_only(self, monkeypatch):
+        _feed(monkeypatch, [""])
+        assert launch.choose_gpu() is None
+
+
+class TestPromptHelpers:
+    def test_blank_keeps_current(self, monkeypatch):
+        _feed(monkeypatch, [""])
+        assert launch.prompt_optional("repo", "owner/repo") == "owner/repo"
+
+    def test_dash_clears(self, monkeypatch):
+        _feed(monkeypatch, ["-"])
+        assert launch.prompt_optional("repo", "owner/repo") is None
+
+    def test_blank_with_no_current_is_none(self, monkeypatch):
+        _feed(monkeypatch, [""])
+        assert launch.prompt_optional("repo", None) is None
+
+    def test_list_keeps_current(self, monkeypatch):
+        _feed(monkeypatch, [""])
+        assert launch.prompt_list("secrets", ["a", "b"]) == ["a", "b"]
+
+    def test_list_dash_empties(self, monkeypatch):
+        _feed(monkeypatch, ["-"])
+        assert launch.prompt_list("secrets", ["a", "b"]) == []
+
+    def test_list_splits_and_strips(self, monkeypatch):
+        _feed(monkeypatch, ["a , b"])
+        assert launch.prompt_list("secrets", None) == ["a", "b"]
+
+
+class TestEditPreset:
+    """Answers, in prompt order: name, image, gpu, [gpu count], cpu, memory,
+    repo, [ref], hours, code_server, marimo, settings_repo, [use_gh_token],
+    with_launcher, extra_repos, extra_secrets, volume."""
+
+    @pytest.fixture
+    def saved(self, monkeypatch):
+        out = []
+        monkeypatch.setattr(launch, "save_presets", lambda p: out.append(p))
+        return out
+
+    def test_all_blank_answers_keep_every_field(self, saved, monkeypatch):
+        p = _preset(name="alpha", volume="alpha", repo="owner/repo", ref="dev",
+                    gpu="A100-80GB", count=7, extra_repos=["x/y"])
+        before = dict(p)
+        _feed(monkeypatch, [""] * 17)
+        launch.edit_preset([p], p)
+        for key in before:
+            assert p[key] == before[key], key
+        assert saved  # persisted
+
+    def test_changes_are_applied_in_place(self, saved, monkeypatch):
+        p = _preset(name="alpha", volume="alpha", gpu="A100-80GB", hours=8)
+        presets = [p]
+        _feed(monkeypatch, [
+            "",       # name unchanged
+            "",       # image unchanged
+            "2", "",  # GPU → T4, 1 of them
+            "4",      # cpu
+            "8192",   # memory
+            "",       # repo (none)
+            "2",      # hours
+            "n",      # code_server off
+            "",       # marimo
+            "",       # settings repo
+            "y",      # with_launcher
+            "",       # extra repos
+            "",       # extra secrets
+            "",       # volume — keeps 'alpha'
+        ])
+        launch.edit_preset(presets, p)
+        assert presets[0] is p  # same object, edited in place
+        assert p["gpu"] == "T4"
+        assert p["cpu"] == 4.0 and p["memory"] == 8192 and p["hours"] == 2
+        assert p["code_server"] is False and p["marimo"] is True
+        assert p["with_launcher"] is True
+        assert launch.preset_volume(p) == "alpha"
+
+    def test_repo_can_be_cleared_and_skips_ref_prompt(self, saved, monkeypatch):
+        p = _preset(name="alpha", volume="alpha", repo="owner/repo", ref="dev",
+                    gpu=None, use_gh_token=True)
+        # No ref/gh-token prompts once the repo is cleared; a stray answer would
+        # desync the rest of the script and fail the assertions below.
+        _feed(monkeypatch, ["", "", "", "", "", "-", "", "", "", "", "", "", "", ""])
+        launch.edit_preset([p], p)
+        assert p["repo"] is None and p["ref"] is None
+        assert p["use_gh_token"] is False
+
+    def test_unknown_keys_survive_an_edit(self, saved, monkeypatch):
+        p = _preset(name="alpha", volume="alpha", gpu=None)
+        p["launcher_ref"] = "feature-branch"
+        p["modal_secret"] = ""
+        _feed(monkeypatch, [""] * 16)
+        launch.edit_preset([p], p)
+        assert p["launcher_ref"] == "feature-branch"
+        assert p["modal_secret"] == ""
+
+    def test_editing_adopts_a_catalog_preset(self, saved, monkeypatch):
+        p = _preset(name="alpha", volume="alpha", gpu=None)
+        p[launch.SOURCE_KEY] = "builtin"
+        _feed(monkeypatch, [""] * 16)
+        launch.edit_preset([p], p)
+        assert p[launch.SOURCE_KEY] == "user"
+
+    def test_rename_defaults_volume_to_the_new_slug(self, saved, monkeypatch):
+        p = _preset(name="alpha", volume=None, gpu=None)  # volume follows the name
+        _feed(monkeypatch, ["New Box"] + [""] * 15)
+        launch.edit_preset([p], p)
+        assert p["name"] == "New Box"
+        assert launch.preset_volume(p) == "new-box"
+
+    def test_ephemeral_preset_stays_ephemeral_on_blank_answers(self, saved, monkeypatch):
+        p = _preset(name="alpha", persist=False, volume=None, gpu=None)
+        _feed(monkeypatch, [""] * 16)
+        launch.edit_preset([p], p)
+        assert launch.preset_volume(p) is None
+
+
+class TestEditFlow:
+    def _presets(self):
+        return [_preset(name="a", volume="a", gpu=None),
+                _preset(name="b", volume="b", gpu=None)]
+
+    def test_edits_selected(self, monkeypatch):
+        presets = self._presets()
+        monkeypatch.setattr(launch, "save_presets", lambda p: None)
+        edited = []
+        monkeypatch.setattr(launch, "edit_preset",
+                            lambda ps, p: edited.append(p["name"]))
+        _feed(monkeypatch, ["2"])
+        launch.edit_flow(presets)
+        assert edited == ["b"]
+
+    def test_blank_cancels(self, monkeypatch):
+        monkeypatch.setattr(launch, "edit_preset",
+                            lambda *a: pytest.fail("should not edit"))
+        _feed(monkeypatch, [""])
+        launch.edit_flow(self._presets())
+
+    def test_invalid_index_is_noop(self, monkeypatch):
+        monkeypatch.setattr(launch, "edit_preset",
+                            lambda *a: pytest.fail("should not edit"))
+        _feed(monkeypatch, ["9"])
+        launch.edit_flow(self._presets())
+
+    def test_no_presets(self, capsys):
+        launch.edit_flow([])
+        assert "no presets to edit" in capsys.readouterr().out
+
+
+class TestMenuEditSuffix:
+    @pytest.fixture
+    def env(self, monkeypatch):
+        presets = [_preset(name="alpha", volume="alpha", count=5),
+                   _preset(name="beta", volume="shared")]
+        monkeypatch.setattr(launch, "launch", lambda p: 0)
+        monkeypatch.setattr(launch, "save_presets", lambda p: None)
+        edited = []
+        monkeypatch.setattr(launch, "edit_preset",
+                            lambda ps, p: edited.append(p["name"]))
+        return presets, edited
+
+    def test_suffix_edits_then_redraws_and_launches(self, env, monkeypatch):
+        presets, edited = env
+        _feed(monkeypatch, ["2e", "1"])  # edit beta, then launch alpha
+        with pytest.raises(SystemExit) as e:
+            launch.menu(presets)
+        assert e.value.code == 0
+        assert edited == ["beta"]
+
+    def test_edit_menu_entry(self, env, monkeypatch):
+        presets, edited = env
+        _feed(monkeypatch, ["4", "1", "1"])  # [edit a preset] → #1, then launch #1
+        with pytest.raises(SystemExit):
+            launch.menu(presets)
+        assert edited == ["alpha"]
+
+    def test_remove_entry_moved_after_edit(self, env, monkeypatch):
+        presets, _ = env
+        removed = []
+        monkeypatch.setattr(launch, "remove_flow", lambda ps: removed.append(True))
+        _feed(monkeypatch, ["5", "1"])  # [remove a preset], then launch
+        with pytest.raises(SystemExit):
+            launch.menu(presets)
+        assert removed == [True]
+
+
 class TestEnsureSSHKey:
     def test_detects_existing_key(self, tmp_path, monkeypatch):
         (tmp_path / "id_ed25519.pub").write_text("ssh-ed25519 EXISTING\n")
