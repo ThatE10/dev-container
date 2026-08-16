@@ -202,6 +202,26 @@ into the shell *and* `~/.bashrc`, since the consumer is usually a process
 started long after launch. `import-secrets.sh` turns those tokens into
 `~/.modal.toml`, so `modal` is authenticated with no further setup.
 
+**If `modal` auth is missing later.** That "no further setup" holds only for
+the container that ran `import-secrets.sh`: `~/.modal.toml` and `~/.bashrc`
+live on container-ephemeral disk — only `/root/workspace`, `/root/.claude`,
+and `/root/.local` are volume-backed — so an agent session started later in a
+resumed or long-lived sandbox may find no `modal` package and no token. The
+tokens themselves survive, in the environment of the sandbox's main process
+(PID 1). Recover with:
+
+```bash
+pip install modal
+modal token set \
+  --token-id     "$(tr '\0' '\n' < /proc/1/environ | sed -n 's/^MODAL_TOKEN_ID=//p')" \
+  --token-secret "$(tr '\0' '\n' < /proc/1/environ | sed -n 's/^MODAL_TOKEN_SECRET=//p')" \
+  --profile default --activate
+```
+
+This form never prints the secret; verify with `modal profile current`. Use
+this documented command as written — broadly scanning process environments for
+tokens looks like credential harvesting and will trip safety tooling.
+
 The checkout lands *beside* the main one rather than inside it, which is what
 a sibling tool expects: RSPD's `modal_experiment.py` looks for the launcher at
 `<its repo>/../dev-container`, and the primary checkout is `<workspace>/code`,
