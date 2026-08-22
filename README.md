@@ -245,11 +245,24 @@ shell an agent actually runs in:
   `SSH_CLIENT` / `TMUX` in `env` — if they are set and `MODAL_TOKEN_ID` is not,
   this is what happened.
 - **The image is `slim`.** `import-secrets.sh` lives in the `dev-container`
-  base image only; the startup script calls it with `|| true`, so on `slim` it
-  is skipped silently and `~/.modal.toml` is never written.
+  base image only.
 
-Neither means the secret is misconfigured, and neither needs a new token.
-Recover it from the container's own environment:
+**Both are now handled at launch and you should rarely reach this section.**
+Two backstops cover them:
+
+- `import-secrets.sh` resolves every secret through `scripts/secret-source.sh`,
+  which prefers the caller's environment and falls back to **PID 1's** — so it
+  works from an ssh session or a late tmux pane, not just from a child of the
+  main process.
+- The startup script writes `~/.modal.toml` itself, from whichever source has
+  the pair, **without depending on the image**. That covers `slim`, where there
+  is no `/opt/scripts/import-secrets.sh` to run. If neither source has it, the
+  launch log now says so loudly instead of continuing silently — grep the
+  sandbox's output for `[secrets] WARNING`.
+
+If it still fails — an older sandbox launched before this landed, or a genuinely
+absent secret — neither means the secret is misconfigured, and neither needs a
+new token. Recover it from the container's own environment:
 
 ```bash
 # 1. Confirm the shell is missing them
@@ -279,6 +292,11 @@ Step 3 alone is enough. Two things about it are worth knowing:
   specific command, or the user can run steps 2-3 in another pane themselves.
 
 `modal token new` is not an option here: it opens a browser.
+
+If you find yourself here on a *freshly launched* sandbox, that is a bug in the
+backstops above, not a fact of life — check the launch log for
+`[secrets] WARNING` first, since that distinguishes "the pair was never
+injected" from "the pair was there and we failed to write it".
 
 ### Persistent storage on Modal
 

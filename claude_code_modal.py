@@ -297,6 +297,41 @@ def build_startup(base_dir: str, work_dir: str, code_server: bool, marimo: bool,
         # ~/.modal.toml, which is what lets an agent inside the sandbox drive
         # Modal itself.
         "([ -x /opt/scripts/import-secrets.sh ] && /opt/scripts/import-secrets.sh || true)",
+        # Backstop for the one credential whose absence is silently fatal.
+        #
+        # Two independent things stop the line above from writing ~/.modal.toml,
+        # and both present as "Token missing" — indistinguishable from a secret
+        # that was never attached:
+        #   * on `slim` there is no /opt/scripts/import-secrets.sh at all, and
+        #     the `|| true` swallows that;
+        #   * Modal injects a secret's values onto the container's MAIN process,
+        #     so a startup script, an ssh session, or a later tmux server may not
+        #     have them in its own environment.
+        # Without ~/.modal.toml an agent inside cannot commission any further
+        # sandboxes, which is the entire point of attaching modal-secret — so
+        # write it here from whichever source has the pair, image-independently,
+        # and say so loudly when neither does.
+        'if [ ! -s "$HOME/.modal.toml" ]; then',
+        # PID1_ENVIRON is overridable so this is testable against a fixture
+        # rather than against the running container's real credentials.
+        '  _pe="${PID1_ENVIRON:-/proc/1/environ}"',
+        '  _p1() { [ -r "$_pe" ] && tr \'\\0\' \'\\n\' < "$_pe"'
+        ' 2>/dev/null | sed -n "s/^$1=//p" | head -1; }',
+        '  _mid="${MODAL_TOKEN_ID:-$(_p1 MODAL_TOKEN_ID)}"',
+        '  _msec="${MODAL_TOKEN_SECRET:-$(_p1 MODAL_TOKEN_SECRET)}"',
+        '  if [ -n "$_mid" ] && [ -n "$_msec" ]; then',
+        '    printf \'[default]\\ntoken_id = "%s"\\ntoken_secret = "%s"\\n\''
+        ' "$_mid" "$_msec" > "$HOME/.modal.toml"',
+        '    chmod 600 "$HOME/.modal.toml"',
+        '    echo "[secrets] Modal credentials written to ~/.modal.toml"',
+        '  else',
+        '    echo "[secrets] WARNING: no Modal credentials in this environment or'
+        ' on PID 1 —" >&2',
+        '    echo "[secrets]          an agent in this sandbox will NOT be able to'
+        ' launch Modal jobs." >&2',
+        '  fi',
+        '  unset _mid _msec _pe',
+        'fi',
     ]
 
     # Exported here for the startup script *and* appended to ~/.bashrc, because
