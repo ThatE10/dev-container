@@ -260,9 +260,24 @@ Two backstops cover them:
   launch log now says so loudly instead of continuing silently — grep the
   sandbox's output for `[secrets] WARNING`.
 
-If it still fails — an older sandbox launched before this landed, or a genuinely
-absent secret — neither means the secret is misconfigured, and neither needs a
-new token. Recover it from the container's own environment:
+There is a third case the backstops **cannot** cover, because it happens long
+after launch: `~/.modal.toml` and `~/.bashrc` live on container-ephemeral disk —
+only `/root/workspace`, `/root/.claude` and `/root/.local` are volume-backed — so
+an agent session started later in a *resumed* or long-lived sandbox finds neither
+the `modal` package nor the token, even though the original launch wrote both
+correctly. The tokens themselves survive, in PID 1's environment. Reinstall and
+re-set:
+
+```bash
+pip install modal
+```
+
+then run the recovery below.
+
+If it still fails — an older sandbox launched before this landed, a resumed
+sandbox as above, or a genuinely absent secret — neither means the secret is
+misconfigured, and neither needs a new token. Recover it from the container's own
+environment:
 
 ```bash
 # 1. Confirm the shell is missing them
