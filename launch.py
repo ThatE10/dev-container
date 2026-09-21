@@ -62,7 +62,7 @@ IMAGE_CHOICES = [
     ("dev-container (GPU, vLLM, torch pre-installed)", DEFAULT_IMAGE),
     ("slim (debian_slim — fast, CPU-only)", "slim"),
 ]
-DEFAULT_EXTRA_SECRETS = ["huggingface-secret", "github-secret"]
+DEFAULT_EXTRA_SECRETS = ["huggingface-secret", "github-secret", "wandb-secret"]
 
 GPU_CHOICES = [
     ("none (CPU only)", None),
