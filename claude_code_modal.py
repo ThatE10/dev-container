@@ -442,7 +442,7 @@ def build_startup(base_dir: str, work_dir: str, code_server: bool, marimo: bool,
 # Modal secrets attached by default (in addition to claude-code-secret which is
 # always attached). Missing secrets will cause sandbox creation to fail with a
 # clear error — remove from the list or create via `modal secret create`.
-DEFAULT_SECRETS = ["huggingface-secret", "github-secret"]
+DEFAULT_SECRETS = ["huggingface-secret", "github-secret", "wandb-secret"]
 
 # ── Persistent storage ────────────────────────────────────────────────────────
 # When --persist is on (default) main() mounts a Modal Volume trio, mirroring the

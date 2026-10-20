@@ -262,9 +262,30 @@ class TestBuildCmd:
         assert cmd[i + 1] == ""
 
     def test_secrets_forwarded(self):
-        cmd = launch.build_cmd(_preset(extra_secrets=["huggingface-secret", "wandb-secret"]))
+        cmd = launch.build_cmd(_preset(extra_secrets=["huggingface-secret", "openai-secret"]))
         assert cmd.count("--secret") == 2
+        assert "openai-secret" in cmd
+
+    def test_default_extra_secrets_includes_wandb(self):
+        # No "extra_secrets" key at all -> build_cmd falls back to
+        # DEFAULT_EXTRA_SECRETS, which now includes wandb-secret by default
+        # alongside huggingface-secret and github-secret.
+        preset = _preset()
+        del preset["extra_secrets"]
+        cmd = launch.build_cmd(preset)
+        assert cmd.count("--secret") == len(launch.DEFAULT_EXTRA_SECRETS)
         assert "wandb-secret" in cmd
+        assert "huggingface-secret" in cmd
+        assert "github-secret" in cmd
+
+    def test_duplicate_secrets_are_not_deduped_by_build_cmd(self):
+        # build_cmd forwards the preset's extra_secrets list verbatim; it is
+        # the preset data (or the user) that is responsible for not listing
+        # the same secret twice. Document that behavior explicitly so a
+        # future default-list change doesn't silently start double-attaching
+        # a secret that's both a default and an explicit extra.
+        cmd = launch.build_cmd(_preset(extra_secrets=["wandb-secret", "wandb-secret"]))
+        assert cmd.count("wandb-secret") == 2
 
     def test_repo_and_ref(self):
         cmd = launch.build_cmd(_preset(repo="owner/repo", ref="dev"))

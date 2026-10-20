@@ -177,10 +177,12 @@ usual API keys:
 
 - `huggingface-secret` (`HF_TOKEN`) → written to `~/.cache/huggingface/token`
 - `github-secret` (`GH_TOKEN` or `GITHUB_TOKEN`) → `gh auth login` runs at startup
+- `wandb-secret` (`WANDB_API_KEY`) → enables online W&B logging instead of the
+  file-only/offline fallback
 
 Add more via `--secret NAME` (repeatable) on `claude_code_modal.py`, or when
 creating a preset the launcher prompts for a comma-separated list. Common
-extras: `wandb-secret` (`WANDB_API_KEY`), `openai-secret`, `anthropic-secret`.
+extras: `openai-secret`, `anthropic-secret`.
 
 On startup the sandbox runs the dev-container's `import-secrets.sh`, which
 writes each token to its canonical config location (HF, WandB, Modal, gh).
