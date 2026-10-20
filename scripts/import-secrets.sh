@@ -5,9 +5,14 @@
 set -euo pipefail
 
 info() { echo "  [secrets] $*"; }
+warn() { echo "  [secrets] WARNING: $*" >&2; }
+
+# Secret resolution (env, then PID 1) — see scripts/secret-source.sh for why.
+. "$(dirname "${BASH_SOURCE[0]}")/secret-source.sh"
 
 # ── HuggingFace ───────────────────────────────────────────────────────────────
-HF_TOKEN="${HF_TOKEN:-${HUGGINGFACE_HUB_TOKEN:-}}"
+HF_TOKEN="$(secret HF_TOKEN)"
+[ -n "$HF_TOKEN" ] || HF_TOKEN="$(secret HUGGINGFACE_HUB_TOKEN)"
 if [ -n "$HF_TOKEN" ]; then
     mkdir -p /root/.cache/huggingface
     printf '%s' "$HF_TOKEN" > /root/.cache/huggingface/token
@@ -15,24 +20,33 @@ if [ -n "$HF_TOKEN" ]; then
 fi
 
 # ── Modal ─────────────────────────────────────────────────────────────────────
-if [ -n "${MODAL_TOKEN_ID:-}" ] && [ -n "${MODAL_TOKEN_SECRET:-}" ]; then
+MODAL_TOKEN_ID="$(secret MODAL_TOKEN_ID)"
+MODAL_TOKEN_SECRET="$(secret MODAL_TOKEN_SECRET)"
+if [ -n "$MODAL_TOKEN_ID" ] && [ -n "$MODAL_TOKEN_SECRET" ]; then
     cat > /root/.modal.toml << EOF
 [default]
 token_id = "$MODAL_TOKEN_ID"
 token_secret = "$MODAL_TOKEN_SECRET"
 EOF
+    chmod 600 /root/.modal.toml
     info "Modal credentials written to ~/.modal.toml"
+else
+    warn "no Modal credentials in this environment or on PID 1 — an agent in"
+    warn "this container will not be able to launch Modal jobs."
 fi
 
 # ── Weights & Biases ──────────────────────────────────────────────────────────
-if [ -n "${WANDB_API_KEY:-}" ]; then
+WANDB_API_KEY="$(secret WANDB_API_KEY)"
+if [ -n "$WANDB_API_KEY" ]; then
     mkdir -p /root/.config/wandb
     printf '%s' "$WANDB_API_KEY" > /root/.config/wandb/auth
     info "Weights & Biases token written"
 fi
 
 # ── GitHub CLI ────────────────────────────────────────────────────────────────
-if [ -n "${GITHUB_TOKEN:-}" ]; then
+GITHUB_TOKEN="$(secret GITHUB_TOKEN)"
+[ -n "$GITHUB_TOKEN" ] || GITHUB_TOKEN="$(secret GH_TOKEN)"
+if [ -n "$GITHUB_TOKEN" ]; then
     echo "$GITHUB_TOKEN" | gh auth login --with-token 2>/dev/null \
         && info "GitHub CLI authenticated" \
         || info "GitHub CLI auth failed (non-fatal)"
