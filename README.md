@@ -199,8 +199,12 @@ That clones `ThatE10/dev-container` to `<workspace>/dev-container`, attaches
 the Modal secret (`--modal-secret`, default `modal-secret`, holding
 `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET`), and exports `$DEV_CONTAINER_DIR` —
 into the shell *and* `~/.bashrc`, since the consumer is usually a process
-started long after launch. `import-secrets.sh` turns those tokens into
-`~/.modal.toml`, so `modal` is authenticated with no further setup.
+started long after launch. On the `dev-container` base image,
+`import-secrets.sh` then turns those tokens into `~/.modal.toml`.
+
+**It does not always land, and the failure looks like a missing credential
+rather than a plumbing gap** — see the next section before concluding the
+secret is wrong.
 
 The checkout lands *beside* the main one rather than inside it, which is what
 a sibling tool expects: RSPD's `modal_experiment.py` looks for the launcher at
@@ -228,6 +232,53 @@ Credentials that let a sandbox create more sandboxes are worth scoping
 deliberately — an agent holding them can spend money on GPUs. Prefer a token
 with the access you actually want the agent to have, and rotate it if it ever
 lands somewhere it shouldn't.
+
+### When `modal` says "Token missing" inside the sandbox
+
+The secret was almost certainly attached and the token almost certainly
+arrived. Modal injects a secret's values as environment variables **on the
+container's main process**, and two things routinely stop them reaching the
+shell an agent actually runs in:
+
+- **The shell is not a child of that process.** An `ssh` session, or a pane in
+  a `tmux` server started later, gets a fresh login environment. Check for
+  `SSH_CLIENT` / `TMUX` in `env` — if they are set and `MODAL_TOKEN_ID` is not,
+  this is what happened.
+- **The image is `slim`.** `import-secrets.sh` lives in the `dev-container`
+  base image only; the startup script calls it with `|| true`, so on `slim` it
+  is skipped silently and `~/.modal.toml` is never written.
+
+Neither means the secret is misconfigured, and neither needs a new token.
+Recover it from the container's own environment:
+
+```bash
+# 1. Confirm the shell is missing them
+env | grep '^MODAL_TOKEN' || echo "not in this shell"
+
+# 2. They are on PID 1, where Modal injected them
+tr '\0' '\n' < /proc/1/environ | grep '^MODAL_TOKEN'
+
+# 3. Persist. This form never prints the secret.
+modal token set \
+  --token-id     "$(tr '\0' '\n' < /proc/1/environ | sed -n 's/^MODAL_TOKEN_ID=//p')" \
+  --token-secret "$(tr '\0' '\n' < /proc/1/environ | sed -n 's/^MODAL_TOKEN_SECRET=//p')" \
+  --profile default --activate
+
+# 4. Verify
+modal volume list
+```
+
+Step 3 alone is enough. Two things about it are worth knowing:
+
+- **Use `modal token set`, not `export`.** An agent's shell state does not
+  survive between tool calls, so an exported variable is gone by the next
+  command. `~/.modal.toml` is on disk and persists for the life of the sandbox.
+- **An agent may be blocked from reading `/proc/1/environ`.** Harnesses that
+  guard credential access will refuse it, correctly — the agent is scanning
+  another process's environment for secrets. It needs the user to approve that
+  specific command, or the user can run steps 2-3 in another pane themselves.
+
+`modal token new` is not an option here: it opens a browser.
 
 ### Persistent storage on Modal
 
