@@ -147,6 +147,24 @@ python claude_code_modal.py --repo owner/repo --gpu A100-80GB
 python claude_code_modal.py --image slim --no-marimo      # fast CPU box, VS Code only
 ```
 
+### Finding a running sandbox again
+
+The SSH command and tunnel URLs are printed once, at launch. If that terminal
+is gone, ask:
+
+```bash
+python claude_code_modal.py --ls
+```
+
+which lists every *running* sandbox with its `ssh` command, service URLs, and
+the `modal shell` / `modal container stop` equivalents — all re-derived live,
+so it works no matter how long ago you launched. Finished sandboxes are hidden
+(a run-then-die job leaves plenty). A batch job with no ports still appears,
+since `modal shell` is the only way into one.
+
+The plain Modal CLI covers the same ground more coarsely: `modal app list`,
+`modal container list`, `modal shell <id>`.
+
 ### Batch jobs (run-then-die)
 
 A dev box you leave running bills for the GPU whether or not it's computing.
@@ -287,12 +305,18 @@ context that survives `make down` locally now survives a Modal sandbox
 shutdown too. Each preset is backed by a named set of Modal Volumes mirroring
 the Docker volumes above:
 
-| Persisted                                     | Mounted at              |
-| --------------------------------------------- | ----------------------- |
-| Project code + per-project `.venv`s           | `/root/workspace`       |
-| code-server extensions/settings, shell history, `pip install --user` | `/root/.local` |
-| Claude Code config & chat history             | `/root/.claude`         |
-| Downloaded model weights (HuggingFace)        | `/root/.cache/huggingface` |
+| Persisted                                     | Mounted at              | Scope |
+| --------------------------------------------- | ----------------------- | ----- |
+| Project code + per-project `.venv`s           | `/root/workspace`       | per `--volume-name` |
+| code-server extensions/settings, shell history, `pip install --user` | `/root/.local` | per `--volume-name` |
+| Claude Code config & chat history             | `/root/.claude`         | per `--volume-name` |
+| Downloaded model weights (HuggingFace)        | `/root/.cache/huggingface` | **shared, always mounted** |
+
+The first three are what `--no-persist` turns off. The model cache is
+deliberately not among them: it holds downloaded weights rather than
+per-sandbox state, so it mounts even for an ephemeral box — otherwise every
+run-then-die job would re-fetch tens of GB, which rather defeats the point of
+cheap disposable containers. Skip it with `--hf-cache-volume ''`.
 
 The volume name defaults to the preset name, so relaunching the same preset
 restores its state — but presets and volumes are decoupled. Creating a preset

@@ -78,9 +78,12 @@ single source of truth, so `launch.py` never silently forks a shared preset.
 Presets are persistent by default. Each is backed by a named set of Modal
 Volumes — `ccm-<volume>-workspace`, `ccm-<volume>-local` and
 `ccm-<volume>-claude` — mounted at `/root/workspace`, `/root/.local` and
-`/root/.claude`, plus the HuggingFace cache volume (`claude-code-hf-cache` by
-default), which is *shared* across sandboxes rather than per-preset since it's
-read-mostly after the first download. The volume name defaults to the preset
+`/root/.claude`. Separately — and regardless of whether the preset is
+persistent — the HuggingFace cache volume (`claude-code-hf-cache` by default)
+mounts at `/root/.cache/huggingface`. It is *shared* across sandboxes rather
+than per-preset, because it holds downloaded weights rather than per-sandbox
+state, and an ephemeral box benefits from it just as much as a persistent one.
+Skip it with `--hf-cache-volume ''`. The volume name defaults to the preset
 name, but presets and volumes are decoupled: creating a preset opens a volume
 picker listing the volumes your other presets use — pick one to share storage
 between presets, type a new name, or choose the ephemeral option for a
