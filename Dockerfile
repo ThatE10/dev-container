@@ -130,6 +130,21 @@ RUN curl -fsSL https://code-server.dev/install.sh \
 ENV HF_HOME=/root/.cache/huggingface
 ENV TRANSFORMERS_CACHE=/root/.cache/huggingface/transformers
 
+# ── Node + Claude Code CLI ────────────────────────────────────────────────────
+# The README and the image label promise the CLI; until now nothing installed
+# it in this image (only the Modal launcher's extra layers did). Node 20 from
+# NodeSource matches what claude_code_modal.py layers on, so on Modal the
+# launcher's `npm install -g` becomes a quick no-op on this base.
+#
+# The entrypoint refreshes the CLI to the latest release at start
+# (CLAUDE_CODE_UPDATE=0 skips it), so the copy baked here is the fallback for
+# an offline start, not the version you end up running.
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install -g @anthropic-ai/claude-code \
+    && claude --version
+
 # ── Claude Code credentials location ─────────────────────────────────────────
 # The entrypoint writes CLAUDE_CREDENTIALS → ~/.claude/.credentials.json
 # so `claude` works without re-authenticating inside the container.

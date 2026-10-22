@@ -52,6 +52,8 @@ services:
       CLAUDE_SETTINGS_REPO:   ${CLAUDE_SETTINGS_REPO:-ThatE10/claude-code-settings}
       CLAUDE_SETTINGS_BRANCH: ${CLAUDE_SETTINGS_BRANCH:-main}
       CLAUDE_SETTINGS_SYNC:   ${CLAUDE_SETTINGS_SYNC:-1}
+      # Refresh the Claude Code CLI to the latest release on start (0 = skip).
+      CLAUDE_CODE_UPDATE:     ${CLAUDE_CODE_UPDATE:-1}
 
     # ── Shared memory — required for PyTorch DataLoader workers ──────────────
     shm_size: '16gb'

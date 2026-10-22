@@ -147,6 +147,27 @@ python claude_code_modal.py --repo owner/repo --gpu A100-80GB
 python claude_code_modal.py --image slim --no-marimo      # fast CPU box, VS Code only
 ```
 
+### What the two base images carry
+
+`--image slim` is Debian slim plus the same shell tooling the full image's
+Dockerfile installs — `tmux`, `htop`, `vim`, `nano`, `wget`, `unzip`, `curl`,
+`git` — and the `scripts/` directory at `/opt/scripts`, so `import-secrets.sh`
+runs there too. What it lacks is torch, CUDA and the vLLM stack: pick it for
+a cheap CPU box, not for anything that loads a model. The built-in
+`cpu-small` preset uses it.
+
+### Keeping Claude Code current
+
+Modal caches each image layer by its command text, so the layer that runs
+`npm install -g @anthropic-ai/claude-code` is built once and reused for every
+later launch — it is never re-run when a new release ships, and a sandbox
+launched months later would still carry the release npm served the first
+time. The startup script therefore refreshes the CLI to `@latest` on every
+interactive launch (a few seconds; best-effort, so a registry outage never
+blocks a start — the image's copy stays in place and a warning is printed).
+Pass `--no-claude-update` to run exactly the image's copy. A run-then-die
+batch job has no CLI to refresh and skips the step.
+
 ### Finding a running sandbox again
 
 The SSH command and tunnel URLs are printed once, at launch. If that terminal
@@ -262,9 +283,11 @@ shell an agent actually runs in:
   a `tmux` server started later, gets a fresh login environment. Check for
   `SSH_CLIENT` / `TMUX` in `env` — if they are set and `MODAL_TOKEN_ID` is not,
   this is what happened.
-- **The image is `slim`.** `import-secrets.sh` lives in the `dev-container`
-  base image only; the startup script calls it with `|| true`, so on `slim` it
-  is skipped silently and `~/.modal.toml` is never written.
+- **The sandbox predates the slim fix.** `import-secrets.sh` used to live in
+  the `dev-container` base image only; the startup script calls it with
+  `|| true`, so on `slim` it was skipped silently and `~/.modal.toml` was never
+  written. The launcher now bakes `scripts/` into the slim image as well, so a
+  sandbox launched from current `main` runs it on both bases.
 
 Neither means the secret is misconfigured, and neither needs a new token.
 Recover it from the container's own environment:
