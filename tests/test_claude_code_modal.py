@@ -90,12 +90,38 @@ class TestBuildImage:
     def test_slim_base_keeps_its_apt_layer_either_way(self):
         modal.reset()
         full = ccm.build_image("slim", None)
-        assert self._tags(full) == ["apt_install", "run_commands", "pip_install", "env"]
+        assert self._tags(full) == ["apt_install", "add_local_dir", "run_commands",
+                                    "pip_install", "env"]
         gated = ccm.build_image("slim", None, interactive_layers=False)
-        assert self._tags(gated) == ["apt_install", "env"]
+        assert self._tags(gated) == ["apt_install", "add_local_dir", "env"]
         # git/curl/bash/python3 come from the slim branch, not _LAYER_CMDS, so
         # the batch startup script's clone still has git.
-        assert self._args(gated, "apt_install") == [("curl", "git", "bash", "python3")]
+        assert self._args(gated, "apt_install") == [ccm.SLIM_APT_PACKAGES]
+
+    def test_slim_base_has_the_dockerfile_shell_tooling(self):
+        """A slim box used to be a bare curl/git/python3 trio — no tmux, so an
+        interactive debug session or a detached agent had nothing to run in.
+        It now carries the same shell tools as the full image's Dockerfile."""
+        for pkg in ("tmux", "htop", "vim", "nano", "wget", "unzip", "ca-certificates"):
+            assert pkg in ccm.SLIM_APT_PACKAGES
+        # ...and the originals are still there for the startup script's clone.
+        for pkg in ("curl", "git", "bash", "python3"):
+            assert pkg in ccm.SLIM_APT_PACKAGES
+
+    def test_slim_base_bakes_in_the_startup_scripts(self):
+        """import-secrets.sh only existed on the full image, so a slim box
+        silently skipped it and never got ~/.modal.toml. The scripts directory
+        now ships with slim too, at the path build_startup looks for."""
+        modal.reset()
+        img = ccm.build_image("slim", None, interactive_layers=False)
+        assert self._args(img, "add_local_dir") == [(str(ccm.SCRIPTS_DIR), "/opt/scripts")]
+        assert (ccm.SCRIPTS_DIR / "import-secrets.sh").is_file()
+
+    def test_registry_base_does_not_get_the_scripts_dir(self):
+        """The full image already ships /opt/scripts from its Dockerfile."""
+        modal.reset()
+        img = ccm.build_image("ghcr.io/thate10/dev-container:latest", "ghcr-secret")
+        assert "add_local_dir" not in self._tags(img)
 
 
 class TestBuildStartup:
@@ -110,10 +136,25 @@ class TestBuildStartup:
                                  kw["marimo"], kw["ssh"], kw["settings_repo"],
                                  kw["settings_branch"], kw["repo"], kw["ref"], kw["clone_dir"],
                                  post_clone=kw["post_clone"], run_cmd=kw["run_cmd"],
-                                 exit_on_finish=kw["exit_on_finish"])
+                                 exit_on_finish=kw["exit_on_finish"],
+                                 claude_update=kw.get("claude_update", True))
 
     def test_writes_credentials(self):
         assert ".credentials.json" in self._startup()
+
+    def test_claude_code_is_refreshed_at_startup_by_default(self):
+        """The image layer that installs the CLI is cached by Modal on its
+        command text, so it freezes at whatever release npm served the first
+        time it was built. Startup refreshes it so a sandbox is current."""
+        s = self._startup()
+        assert f"npm install -g {ccm.CLAUDE_CODE_PACKAGE}@latest" in s
+        assert "command -v npm" in s          # skipped where there is no npm
+        assert "WARNING: could not update Claude Code" in s  # best-effort
+
+    def test_claude_code_refresh_can_be_turned_off(self):
+        s = self._startup(claude_update=False)
+        assert "@latest" not in s
+        assert "npm install" not in s
 
     def test_ssh_runs_sshd_in_foreground_with_ttyd_background(self):
         s = self._startup(ssh=True)
@@ -363,7 +404,17 @@ class TestMainBatch:
         """Still an interactive box afterwards, so it still needs the tooling."""
         k = self._run(exit_on_finish=False)
         tags = [tag for tag, _ in k["image"].commands]
-        assert tags == ["apt_install", "run_commands", "pip_install", "env"]
+        assert tags == ["apt_install", "add_local_dir", "run_commands", "pip_install", "env"]
+
+    def test_batch_exit_skips_the_claude_code_refresh(self):
+        """No CLI on a batch image (the layer that installs it is gated off),
+        so there is nothing to refresh and no npm to do it with."""
+        self._run()
+        assert "@latest" not in modal.LAST_SANDBOX_ARGS[-1]
+
+    def test_run_without_exit_on_finish_still_refreshes_claude_code(self):
+        self._run(exit_on_finish=False)
+        assert f"npm install -g {ccm.CLAUDE_CODE_PACKAGE}@latest" in modal.LAST_SANDBOX_ARGS[-1]
 
     def test_batch_waits_and_returns_the_command_status(self):
         self._run(returncode=0)

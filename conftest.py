@@ -61,6 +61,7 @@ def _install_fake_modal() -> types.ModuleType:
         def pip_install(self, *a, **k):        return self._record("pip_install", *a)
         def run_commands(self, *a, **k):       return self._record("run_commands", *a)
         def dockerfile_commands(self, *a, **k): return self._record("dockerfile", *a)
+        def add_local_dir(self, *a, **k):      return self._record("add_local_dir", *a)
         def env(self, *a, **k):                return self._record("env", *a)
 
     class Image:

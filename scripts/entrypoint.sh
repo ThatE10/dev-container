@@ -15,6 +15,19 @@ if [ -n "${CLAUDE_CREDENTIALS:-}" ]; then
     echo "  [claude] Credentials written to ~/.claude/.credentials.json"
 fi
 
+# ── Claude Code CLI refresh ───────────────────────────────────────────────────
+# The image bakes in whichever release was current at build time; pull the
+# latest on start so a container built months ago is not stuck on it.
+# Best-effort: an offline start keeps the image's copy. CLAUDE_CODE_UPDATE=0
+# skips it (e.g. to pin a known-good release for a reproducible session).
+if [ "${CLAUDE_CODE_UPDATE:-1}" != "0" ] && command -v npm > /dev/null 2>&1; then
+    if npm install -g @anthropic-ai/claude-code@latest > /var/log/claude-update.log 2>&1; then
+        echo "  [claude] Claude Code $(claude --version 2>/dev/null || echo '(version unknown)')"
+    else
+        echo "  [claude] ⚠️  Could not update Claude Code — keeping the image's copy (see /var/log/claude-update.log)" >&2
+    fi
+fi
+
 # ── Global Claude Code settings (~/.claude from a git repo) ───────────────────
 # Clones/pulls your settings repo into ~/.claude so agents/hooks/skills/memory
 # are versioned and auto-updated on start. Runs after credentials so it never

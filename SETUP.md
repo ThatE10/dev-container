@@ -196,9 +196,15 @@ Pass `--secret ''` once to disable the default secrets entirely.
 | `--image` value                         | When to use                                          |
 |-----------------------------------------|------------------------------------------------------|
 | `ghcr.io/thate10/dev-container:latest`  | Default. vLLM + torch + CUDA, plus Claude Code + ttyd. |
-| `slim`                                  | Debian slim. Fast pull, CPU only, no torch/CUDA.     |
+| `slim`                                  | Debian slim + the Dockerfile's shell tools (tmux, htop, vim, nano, wget, unzip) and `/opt/scripts`. Fast pull, CPU only, no torch/CUDA. |
 
 Any other registry tag also works via `--image <tag> --registry-secret <name>`.
+
+On every base the launcher adds Node, the Claude Code CLI, ttyd, code-server
+and sshd as image layers. Modal caches those layers by their command text, so
+the Claude Code install is never re-run for a new release; the startup script
+refreshes the CLI to the latest npm release on each interactive launch instead
+(`--no-claude-update` turns that off).
 
 ## GPU options
 

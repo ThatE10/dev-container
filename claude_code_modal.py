@@ -72,10 +72,17 @@ APP_NAME = "claude-code-server"
 # below. openssh-server + sshd_config tweaks are applied here (not just relied
 # on from the dev-container Dockerfile) so `--image slim` and arbitrary
 # `--image <tag>` bases get working SSH too.
+CLAUDE_CODE_PACKAGE = "@anthropic-ai/claude-code"
+
+# NB: Modal caches each run_commands layer by its text, so the Claude Code
+# install below is built once and reused for every later launch — it is NOT
+# re-run when a new release ships. build_startup refreshes the CLI at sandbox
+# start (claude_update) so the sandbox is current regardless of the layer's
+# age; the layer only guarantees a working copy exists before that runs.
 _LAYER_CMDS = (
     "curl -fsSL https://deb.nodesource.com/setup_20.x | bash -",
     "apt-get install -y nodejs openssh-server",
-    "npm install -g @anthropic-ai/claude-code",
+    f"npm install -g {CLAUDE_CODE_PACKAGE}",
     "curl -fsSL https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.x86_64"
     " -o /usr/local/bin/ttyd && chmod +x /usr/local/bin/ttyd",
     "curl -fsSL https://code-server.dev/install.sh"
@@ -89,6 +96,20 @@ _LAYER_CMDS = (
     "printf '\\nX11Forwarding yes\\nAllowTcpForwarding yes\\n' >> /etc/ssh/sshd_config",
 )
 
+
+# What `--image slim` installs on top of debian_slim. Mirrors the system
+# packages in the dev-container Dockerfile (openssh-server arrives with
+# _LAYER_CMDS), so a slim box has the same shell tooling — tmux in particular,
+# which `modal_experiment.py --interactive` and any detached agent session
+# depend on — rather than a bare curl/git/python3 trio. python3 is what the
+# startup script and the clone need; it is deliberately not Marimo-capable
+# torch, that is what the full image is for.
+SLIM_APT_PACKAGES = ("curl", "git", "bash", "python3", "ca-certificates",
+                     "tmux", "htop", "vim", "nano", "wget", "unzip")
+
+# The dev-container's startup helpers (import-secrets.sh and friends), baked
+# into the slim image so it behaves like the full one at startup.
+SCRIPTS_DIR = Path(__file__).resolve().parent / "scripts"
 
 # Where build_startup writes a batch command before running it. Outside the
 # workspace volume on purpose — it's per-launch scratch, not something to
@@ -178,7 +199,15 @@ def build_image(base: str, registry_secret_name: str | None,
     that only provides ``python3`` — e.g. the vLLM-derived RSPD runtime.
     """
     if base == "slim":
-        img = modal.Image.debian_slim().apt_install("curl", "git", "bash", "python3")
+        img = (
+            modal.Image.debian_slim()
+            .apt_install(*SLIM_APT_PACKAGES)
+            # The dev-container image ships these under /opt/scripts (see its
+            # Dockerfile); baking the same directory into slim means
+            # import-secrets.sh runs there too instead of being skipped, so
+            # ~/.modal.toml, the HF token and ~/.env land on a slim box as well.
+            .add_local_dir(str(SCRIPTS_DIR), "/opt/scripts", copy=True)
+        )
     else:
         secret = modal.Secret.from_name(registry_secret_name) if registry_secret_name else None
         img = (
@@ -261,7 +290,8 @@ def build_startup(base_dir: str, work_dir: str, code_server: bool, marimo: bool,
                   post_clone: str | None = None, run_cmd: str | None = None,
                   exit_on_finish: bool = False,
                   extra_repos: list[tuple[str, str, str]] | None = None,
-                  extra_env: dict[str, str] | None = None) -> str:
+                  extra_env: dict[str, str] | None = None,
+                  claude_update: bool = True) -> str:
     """Bash run at sandbox start: restore creds, import secrets, clone the repo
     (idempotent — skipped if already present on a persistent volume), optionally
     sync ~/.claude, bring up sshd, launch VS Code + Marimo in the background.
@@ -286,6 +316,10 @@ def build_startup(base_dir: str, work_dir: str, code_server: bool, marimo: bool,
     ``extra_repos`` is a list of ``(repo, ref, dir)`` checked out beside the
     primary one; ``extra_env`` is exported both into this script and into
     ``~/.bashrc``, so an interactive shell or an agent started later sees it too.
+
+    ``claude_update`` refreshes the Claude Code CLI to the latest npm release at
+    startup (see the note inline); pass ``False`` for a launch that must run
+    exactly the image's copy.
     """
     lines = [
         f'mkdir -p "{base_dir}" ~/.claude',
@@ -302,6 +336,25 @@ def build_startup(base_dir: str, work_dir: str, code_server: bool, marimo: bool,
         # Modal itself.
         "([ -x /opt/scripts/import-secrets.sh ] && /opt/scripts/import-secrets.sh || true)",
     ]
+
+    if claude_update:
+        # The image layer that installs Claude Code is cached by Modal on its
+        # command text, so without a pin it freezes at whatever npm served the
+        # first time the layer was built — a sandbox launched months later
+        # still gets that release. Refresh at startup instead: the layer keeps
+        # the sandbox usable offline, this keeps it current. Best-effort, so a
+        # registry outage never blocks a launch; skipped where npm is absent
+        # (a batch image without the interactive layers).
+        lines += [
+            'if command -v npm > /dev/null 2>&1; then',
+            f'  if npm install -g {CLAUDE_CODE_PACKAGE}@latest > /tmp/claude-update.log 2>&1; then',
+            '    echo "[claude] Claude Code updated to $(claude --version 2>/dev/null || echo unknown)"',
+            '  else',
+            '    echo "[claude] WARNING: could not update Claude Code (see /tmp/claude-update.log)'
+            ' — keeping the image\'s copy" >&2',
+            '  fi',
+            'fi',
+        ]
 
     # Exported here for the startup script *and* appended to ~/.bashrc, because
     # the thing that usually needs these is an agent or a shell started later —
@@ -570,6 +623,7 @@ def main(
     with_launcher: bool = False,
     launcher_ref: str = "main",
     modal_secret: str | None = "modal-secret",
+    claude_update: bool = True,
 ) -> int:
     """Launch a sandbox. Returns the batch command's exit status when this is a
     run-then-die launch that we waited on, else 0."""
@@ -691,7 +745,10 @@ def main(
                             settings_repo, settings_branch, repo, ref, clone_dir,
                             post_clone=post_clone, run_cmd=run_cmd,
                             exit_on_finish=exit_on_finish,
-                            extra_repos=resolved_extra_repos, extra_env=extra_env)
+                            extra_repos=resolved_extra_repos, extra_env=extra_env,
+                            # No CLI on a batch image, and nothing to update
+                            # it for.
+                            claude_update=claude_update and not batch_exit)
 
     # ttyd only runs as part of the keep-alive, which a run-then-die job has
     # none of — asking Modal to tunnel a port nothing listens on is waste.
@@ -803,6 +860,11 @@ if __name__ == "__main__":
                         help="Settings repo synced into ~/.claude (empty to disable)")
     parser.add_argument("--claude-settings-branch", default="main",
                         help="Settings repo branch (default: main)")
+    parser.add_argument("--no-claude-update", dest="claude_update", action="store_false",
+                        help="Don't refresh the Claude Code CLI to the latest release at "
+                             "startup (by default the sandbox runs `npm install -g "
+                             f"{CLAUDE_CODE_PACKAGE}@latest` so it is current even though "
+                             "the image layer that installs it is cached by Modal)")
     parser.add_argument("--no-ssh", dest="ssh", action="store_false",
                         help="Don't start sshd (falls back to ttyd as the foreground process, "
                              "and `modal shell` as the only remote-shell option)")
@@ -896,4 +958,5 @@ if __name__ == "__main__":
                   detach=args.detach,
                   extra_repos=args.extra_repos, with_launcher=args.with_launcher,
                   launcher_ref=args.launcher_ref,
-                  modal_secret=args.modal_secret or None))
+                  modal_secret=args.modal_secret or None,
+                  claude_update=args.claude_update))
