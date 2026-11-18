@@ -231,7 +231,7 @@ can't, unless it has this launcher's source and Modal credentials.
 `--with-launcher` gives it both:
 
 ```bash
-python claude_code_modal.py --repo ThatE10/rspd --with-launcher
+python claude_code_modal.py --repo ThatE10/rspd-dev --with-launcher
 ```
 
 That clones `ThatE10/dev-container` to `<workspace>/dev-container`, attaches
