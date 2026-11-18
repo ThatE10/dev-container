@@ -11,7 +11,7 @@ import claude_code_modal as ccm
 
 class TestVolumeSlug:
     def test_lowercases_and_dashes_slashes(self):
-        assert ccm.volume_slug("ThatE10/rspd") == "thate10-rspd"
+        assert ccm.volume_slug("ThatE10/rspd-dev") == "thate10-rspd-dev"
 
     def test_collapses_and_trims(self):
         assert ccm.volume_slug("  My  Box!! ") == "my-box"
@@ -338,8 +338,8 @@ class TestMain:
         assert k["workdir"] == f"{ccm.BASE_DIR}/code"
 
     def test_slug_falls_back_to_repo_when_no_volume_name(self):
-        vols = self._run(volume_name=None, repo="ThatE10/rspd")["volumes"]
-        assert vols["/root/workspace"].name == "ccm-thate10-rspd-workspace"
+        vols = self._run(volume_name=None, repo="ThatE10/rspd-dev")["volumes"]
+        assert vols["/root/workspace"].name == "ccm-thate10-rspd-dev-workspace"
 
     def test_encrypted_ports_include_terminal_and_services(self):
         k = self._run(code_server=True, marimo=True)
@@ -365,7 +365,7 @@ class TestMainBatch:
     def _run(self, returncode=0, **over):
         modal.reset()
         modal.NEXT_RETURNCODE = returncode  # after reset(), which clears it
-        kw = dict(repo="ThatE10/rspd", ref="main", hours=4, github_token=None,
+        kw = dict(repo="ThatE10/rspd-dev", ref="main", hours=4, github_token=None,
                   gpu=None, cpu=None, memory=None, image_base="slim",
                   registry_secret="ghcr-secret", extra_secrets=[],
                   code_server=True, marimo=True, settings_repo=None,
@@ -482,7 +482,7 @@ class TestExtraRepos:
 
     def _run(self, **over):
         modal.reset()
-        kw = dict(repo="ThatE10/rspd", ref="main", hours=4, github_token=None,
+        kw = dict(repo="ThatE10/rspd-dev", ref="main", hours=4, github_token=None,
                   gpu=None, cpu=None, memory=None, image_base="slim",
                   registry_secret=None, extra_secrets=[],
                   code_server=False, marimo=False, settings_repo=None,
